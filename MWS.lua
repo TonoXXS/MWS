@@ -1,5 +1,5 @@
 --[[
-	Mini War v2.0.4 / Cyraa Hub v2.0.4
+	Mini War v2.0.4 / Idk Hub v2.0.4
 	Core, configuration, economy, building, collection, and market systems.
 
 	This section is a behavior-preserving high-level reconstruction of source
@@ -2558,7 +2558,7 @@ local function queueReExecutionOnTeleport()
 
 	pcall(function()
 		local reExecutionSource =
-			'loadstring(game:HttpGet("https://raw.githubusercontent.com/LynX99-9/komtolmmek2script/refs/heads/main/CyraaHub.lua", true))()'
+			'loadstring(game:HttpGet("https://raw.githubusercontent.com/TonoXXS/MWS/refs/heads/main/MWS.lua", true))()'
 
 		if queue_on_teleport then
 			queue_on_teleport(reExecutionSource)
@@ -2796,7 +2796,7 @@ UI.refs = uiRefs
 
 local function createInterfaceShell()
 	uiRefs.Window = Library:CreateWindow({
-		Title = "Cyraa Hub",
+		Title = "Idk Hub",
 		Footer = "Mini War v2.0.4",
 		Icon = 111485823583751,
 		NotifySide = "Right",
@@ -2845,7 +2845,7 @@ local function buildHomeFarmUi()
 	uiRefs.FpsLabel = gameInformationGroup:AddLabel("FPS: 0")
 	uiRefs.PingLabel = gameInformationGroup:AddLabel("Ping: 0ms")
 	gameInformationGroup:AddDivider()
-	gameInformationGroup:AddLabel("Cyraa Hub v2.0.4")
+	gameInformationGroup:AddLabel("Idk Hub v2.0.4")
 	gameInformationGroup:AddLabel("Mini War", true)
 	uiRefs.playerInfoLabel = gameInformationGroup:AddLabel("Player Info: Loading...")
 
@@ -2864,21 +2864,21 @@ local function buildHomeFarmUi()
 	socialLinksGroup:AddButton({
 		Text = "Copy Discord Link",
 		Func = function()
-			setclipboard("https://discord.gg/Ggrqtyn9RW")
+			setclipboard("https://discord.gg/")
 			notify("Discord link copied!")
 		end,
 	})
 	socialLinksGroup:AddButton({
 		Text = "Copy TikTok Link",
 		Func = function()
-			setclipboard("https://www.tiktok.com/@komtolmmek2script")
+			setclipboard("https://www.tiktok.com/@pxthxpz")
 			notify("TikTok link copied!")
 		end,
 	})
 	socialLinksGroup:AddButton({
 		Text = "Copy Donate Link",
 		Func = function()
-			setclipboard("https://sociabuzz.com/cyraaaja/tribe")
+			setclipboard("")
 			notify("Donate link copied!")
 		end,
 	})
@@ -4974,7 +4974,7 @@ local function buildShopTeleportMiscUi()
 					end
 
 					blackScreenGui = Instance.new("ScreenGui")
-					blackScreenGui.Name = "CyraaHubBlackScreen"
+					blackScreenGui.Name = "IDKHubBlackScreen"
 					blackScreenGui.ResetOnSpawn = false
 					blackScreenGui.IgnoreGuiInset = true
 					blackScreenGui.DisplayOrder = 999
@@ -5927,8 +5927,8 @@ local function buildServerSettingsUi()
 	SaveManager:SetLibrary(Library)
 	SaveManager:IgnoreThemeSettings()
 	SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
-	ThemeManager:SetFolder("CyraaHub/MiniWar")
-	SaveManager:SetFolder("CyraaHub/MiniWar")
+	ThemeManager:SetFolder("IdkHub/MiniWar")
+	SaveManager:SetFolder("IdkHub/MiniWar")
 
 	pcall(function()
 		SaveManager:BuildConfigSection(uiRefs.Tabs.Settings)
@@ -6012,7 +6012,7 @@ local function createMobileToggleButton()
 	end
 
 	local screenGui = Instance.new("ScreenGui")
-	screenGui.Name = "Cyraa"
+	screenGui.Name = "IDK"
 	screenGui.ResetOnSpawn = false
 	screenGui.IgnoreGuiInset = true
 	screenGui.DisplayOrder = 999
@@ -6210,8 +6210,8 @@ local function startRuntimeWorkers()
 	startUpgradeListRefreshWorker()
 	bindCharacterRespawnHandler()
 
-	notify("Cyraa Hub loaded successfully!\nMade by cyraajaaaa")
-	print("made by komtolmmek2 script")
+	notify("Idk Hub loaded successfully!\nCrack by pxthxp")
+	print("crack by pxthxp")
 end
 
 UI.buildServerSettingsUi = buildServerSettingsUi
