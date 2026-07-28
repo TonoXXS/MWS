@@ -30,8 +30,26 @@ local Automation = {
 	Progression = {},
 }
 local UI = {}
+
+-- Shut down an older copy before creating any new UI, connections, or workers.
+-- The previous runtime owns closures over its own runtimeActive flag, so calling
+-- its exported Destroy method is enough to stop loops from an earlier execute.
+local previousRuntime = State.__MWS_RUNTIME
+if type(previousRuntime) == "table" and type(previousRuntime.Destroy) == "function" then
+	pcall(previousRuntime.Destroy, "reexecute")
+end
+
 local runtimeActive = true
+local runtimeStopped = false
+local runtimeDestroying = false
 local runtimeConnections = {}
+local runtimeCleanups = {}
+local runtimeTasks = setmetatable({}, { __mode = "k" })
+local runtimeWorkerEpoch = {}
+local Runtime = {
+	version = "2.0.4",
+	unloadUi = nil,
+}
 
 local function trackRuntimeConnection(connection)
 	if connection then
@@ -40,19 +58,97 @@ local function trackRuntimeConnection(connection)
 	return connection
 end
 
-local function stopRuntimeConnections()
-	if not runtimeActive then
+local function trackRuntimeCleanup(cleanup)
+	if cleanup then
+		table.insert(runtimeCleanups, cleanup)
+	end
+	return cleanup
+end
+
+local function trackRuntimeTask(thread)
+	if thread then
+		runtimeTasks[thread] = true
+	end
+	return thread
+end
+
+local function runRuntimeCleanup(cleanup)
+	if type(cleanup) == "function" then
+		cleanup()
 		return
 	end
 
+	local cleanupType = type(cleanup)
+	if cleanupType ~= "table" and cleanupType ~= "userdata" then
+		return
+	end
+
+	if cleanup and type(cleanup.Disconnect) == "function" then
+		cleanup:Disconnect()
+	elseif cleanup and type(cleanup.Unsubscribe) == "function" then
+		cleanup:Unsubscribe()
+	elseif cleanup and type(cleanup.unsubscribe) == "function" then
+		cleanup:unsubscribe()
+	elseif cleanup and type(cleanup.Destroy) == "function" then
+		cleanup:Destroy()
+	end
+end
+
+local function stopRuntimeConnections()
+	if runtimeStopped then
+		return
+	end
+
+	runtimeStopped = true
 	runtimeActive = false
+
+	for workerName, epoch in pairs(runtimeWorkerEpoch) do
+		runtimeWorkerEpoch[workerName] = epoch + 1
+	end
+
 	for _, connection in ipairs(runtimeConnections) do
 		pcall(function()
 			connection:Disconnect()
 		end)
 	end
 	table.clear(runtimeConnections)
+
+	local currentThread = coroutine.running()
+	for thread in pairs(runtimeTasks) do
+		if thread ~= currentThread then
+			pcall(task.cancel, thread)
+		end
+	end
+	table.clear(runtimeTasks)
+
+	for index = #runtimeCleanups, 1, -1 do
+		pcall(runRuntimeCleanup, runtimeCleanups[index])
+	end
+	table.clear(runtimeCleanups)
 end
+
+function Runtime.Destroy(_, skipUiUnload)
+	if runtimeStopped or runtimeDestroying then
+		return
+	end
+
+	-- Stop new work before unloading the old interface. Obsidian may invoke its
+	-- own unload callback synchronously, so runtimeDestroying makes this path
+	-- re-entrant safe.
+	runtimeDestroying = true
+	runtimeActive = false
+	if not skipUiUnload and type(Runtime.unloadUi) == "function" then
+		pcall(Runtime.unloadUi)
+	end
+	stopRuntimeConnections()
+
+	if State.__MWS_RUNTIME == Runtime then
+		State.__MWS_RUNTIME = nil
+	end
+	runtimeDestroying = false
+end
+
+State.__MWS_RUNTIME = Runtime
 
 MiniWar.Services = Services
 MiniWar.Config = Config
@@ -60,6 +156,7 @@ MiniWar.State = State
 MiniWar.GameApi = GameApi
 MiniWar.Automation = Automation
 MiniWar.UI = UI
+MiniWar.Runtime = Runtime
 
 -- ============================================================================
 -- External UI dependencies and Roblox services
@@ -122,7 +219,7 @@ function Library:GetIcon(iconName)
 
 	return {
 		IconName = iconName,
-		Url = "rbxassetid://0",
+		Url = "",
 		ImageRectOffset = Vector2.zero,
 		ImageRectSize = Vector2.zero,
 	}
@@ -140,6 +237,20 @@ UI.SaveManager = SaveManager
 UI.ThemeManager = ThemeManager
 UI.Options = Options
 UI.Toggles = Toggles
+
+Runtime.unloadUi = function()
+	if type(Library.Unload) == "function" then
+		Library:Unload()
+	end
+end
+
+if type(Library.OnUnload) == "function" then
+	pcall(function()
+		Library:OnUnload(function()
+			Runtime.Destroy("ui-unload", true)
+		end)
+	end)
+end
 
 local Players, ReplicatedStorage, RunService, TeleportService, HttpService, Workspace, UserInputService, CollectionService, VirtualUser, CoreGui =
 	game:GetService("Players"),
@@ -275,7 +386,7 @@ local function loadGameModules()
 	GameApi.QuestsConfig = QuestsConfig
 end
 
-task.spawn(loadGameModules)
+trackRuntimeTask(task.spawn(loadGameModules))
 
 local bridgeCache = {}
 
@@ -385,7 +496,7 @@ local function connectClanResearchUpdates()
 	end
 end
 
-task.spawn(connectClanResearchUpdates)
+trackRuntimeTask(task.spawn(connectClanResearchUpdates))
 
 local function teleportToCFrame(targetCFrame)
 	local character = LocalPlayer.Character
@@ -532,6 +643,7 @@ State.miscFlyEnabled = false
 State.miscFlySpeed = 50
 State.miscInfJumpEnabled = false
 State.miscNoClipEnabled = false
+State.miscNoClipConn = nil
 State.miscAntiAfkEnabled = false
 State.MISC_FLYING = false
 State.miscFlyKeyDown = nil
@@ -563,6 +675,9 @@ State.autoBPClaimRunning = false
 State.autoBPTrack = "Free"
 State.autoBPCoinsRunning = false
 State._noClipCollisionSnapshot = nil
+State._noClipPartCache = nil
+State._noClipCharacter = nil
+State._noClipRefreshAt = 0
 State._fogSnapshot = nil
 
 local function restoreNoClipCollisions()
@@ -577,6 +692,9 @@ local function restoreNoClipCollisions()
 		end)
 	end
 	State._noClipCollisionSnapshot = nil
+	State._noClipPartCache = nil
+	State._noClipCharacter = nil
+	State._noClipRefreshAt = 0
 end
 
 local function setNoClipEnabled(enabled)
@@ -598,16 +716,34 @@ local function enforceNoClip()
 
 	local snapshot = State._noClipCollisionSnapshot
 	if not snapshot then
-		snapshot = {}
+		snapshot = setmetatable({}, { __mode = "k" })
 		State._noClipCollisionSnapshot = snapshot
 	end
 
-	for _, descendant in ipairs(character:GetDescendants()) do
-		if descendant:IsA("BasePart") then
-			if snapshot[descendant] == nil then
-				snapshot[descendant] = descendant.CanCollide
+	local partCache = State._noClipPartCache
+	local now = os.clock()
+	if State._noClipCharacter ~= character or not partCache then
+		State._noClipCharacter = character
+		partCache = setmetatable({}, { __mode = "k" })
+		State._noClipPartCache = partCache
+		State._noClipRefreshAt = 0
+	end
+
+	if now >= (State._noClipRefreshAt or 0) then
+		State._noClipRefreshAt = now + 1
+		for _, descendant in ipairs(character:GetDescendants()) do
+			if descendant:IsA("BasePart") then
+				partCache[descendant] = true
 			end
-			descendant.CanCollide = false
+		end
+	end
+
+	for part in pairs(partCache) do
+		if part.Parent then
+			if snapshot[part] == nil then
+				snapshot[part] = part.CanCollide
+			end
+			part.CanCollide = false
 		end
 	end
 end
@@ -662,6 +798,69 @@ local function setFogRemoved(enabled)
 	State._fogSnapshot = nil
 end
 
+local function restorePerformanceSnapshot()
+	local snapshot = State._perfSnapshot
+	if not snapshot then
+		return
+	end
+
+	local lighting = game:GetService("Lighting")
+	local terrain = Workspace:FindFirstChildWhichIsA("Terrain")
+
+	if terrain and snapshot.terrain then
+		terrain.WaterWaveSize = snapshot.terrain.waveSize
+		terrain.WaterWaveSpeed = snapshot.terrain.waveSpeed
+		terrain.WaterReflectance = snapshot.terrain.reflectance
+		terrain.WaterTransparency = snapshot.terrain.transparency
+	end
+
+	lighting.GlobalShadows = snapshot.globalShadows
+	lighting.FogEnd = snapshot.fogEnd
+	lighting.FogStart = snapshot.fogStart
+	settings().Rendering.QualityLevel = snapshot.qualityLevel
+
+	for part, savedPart in pairs(snapshot.parts or {}) do
+		pcall(function()
+			part.CastShadow = savedPart.castShadow
+			part.Material = savedPart.material
+			part.Reflectance = savedPart.reflectance
+			part.BackSurface = savedPart.back
+			part.BottomSurface = savedPart.bottom
+			part.FrontSurface = savedPart.front
+			part.LeftSurface = savedPart.left
+			part.RightSurface = savedPart.right
+			part.TopSurface = savedPart.top
+		end)
+	end
+
+	for decal, savedDecal in pairs(snapshot.decals or {}) do
+		pcall(function()
+			decal.Transparency = savedDecal.trans
+			decal.Texture = savedDecal.tex
+		end)
+	end
+
+	for particle, savedParticle in pairs(snapshot.particles or {}) do
+		pcall(function()
+			particle.Lifetime = savedParticle.lifetime
+		end)
+	end
+
+	for postEffect, savedPostEffect in pairs(snapshot.postEffects or {}) do
+		pcall(function()
+			postEffect.Enabled = savedPostEffect.enabled
+		end)
+	end
+
+	if State._perfDescConn then
+		pcall(function()
+			State._perfDescConn:Disconnect()
+		end)
+		State._perfDescConn = nil
+	end
+	State._perfSnapshot = nil
+end
+
 -- ============================================================================
 -- Static catalogs and configuration
 -- ============================================================================
@@ -702,13 +901,45 @@ local collectExcludedBuildingNames = {
 	BuilderControl = true,
 }
 
-local function removeWorldCollectItems()
-	for _, descendant in pairs(Workspace:GetDescendants()) do
-		if table.find(autoRemoveCollectItemNames, descendant.Name) then
-			descendant:Destroy()
-		end
+local autoRemoveCollectItemLookup = {}
+for _, itemName in ipairs(autoRemoveCollectItemNames) do
+	autoRemoveCollectItemLookup[itemName] = true
+end
+
+local autoRemoveCollectConnection
+
+local function removeWorldCollectItem(instance)
+	if
+		autoRemoveCollectItemsEnabled
+		and instance
+		and autoRemoveCollectItemLookup[instance.Name]
+	then
+		pcall(function()
+			instance:Destroy()
+		end)
 	end
 end
+
+local function removeWorldCollectItems()
+	for _, descendant in ipairs(Workspace:GetDescendants()) do
+		removeWorldCollectItem(descendant)
+	end
+end
+
+local function stopAutoRemoveCollectItems()
+	if autoRemoveCollectConnection then
+		autoRemoveCollectConnection:Disconnect()
+		autoRemoveCollectConnection = nil
+	end
+end
+
+local function startAutoRemoveCollectItems()
+	stopAutoRemoveCollectItems()
+	pcall(removeWorldCollectItems)
+	autoRemoveCollectConnection = Workspace.DescendantAdded:Connect(removeWorldCollectItem)
+end
+
+trackRuntimeCleanup(stopAutoRemoveCollectItems)
 
 local function getUpgradeNames()
 	local names = {}
@@ -1613,6 +1844,74 @@ GameApi.findLivingFallenGeneral = findLivingFallenGeneral
 -- Resource collection
 -- ============================================================================
 
+local collectResourceModels = ReplicatedStorage
+	:WaitForChild("shared")
+	:WaitForChild("model")
+	:WaitForChild("Resources")
+local collectPromptCache = setmetatable({}, { __mode = "k" })
+local collectCooldownByBuilding = setmetatable({}, { __mode = "k" })
+local collectCacheBuildings = nil
+local collectCacheConnections = {}
+
+local function disconnectCollectCache()
+	for _, connection in ipairs(collectCacheConnections) do
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+	table.clear(collectCacheConnections)
+	table.clear(collectPromptCache)
+	collectCacheBuildings = nil
+end
+
+trackRuntimeCleanup(disconnectCollectCache)
+
+local function registerCollectPrompt(descendant)
+	if descendant and descendant:IsA("ProximityPrompt") then
+		collectPromptCache[descendant] = true
+	end
+end
+
+local function ensureCollectPromptCache(buildings)
+	if collectCacheBuildings == buildings and buildings.Parent then
+		return
+	end
+
+	disconnectCollectCache()
+	collectCacheBuildings = buildings
+
+	for _, descendant in ipairs(buildings:GetDescendants()) do
+		registerCollectPrompt(descendant)
+	end
+
+	table.insert(collectCacheConnections, buildings.DescendantAdded:Connect(registerCollectPrompt))
+	table.insert(collectCacheConnections, buildings.DescendantRemoving:Connect(function(descendant)
+		collectPromptCache[descendant] = nil
+	end))
+end
+
+local function getCollectBuilding(prompt, buildings)
+	if not prompt or not prompt:IsA("ProximityPrompt") then
+		return nil
+	end
+
+	local building = prompt.Parent
+	if not building or not building:IsA("Model") then
+		building = prompt:FindFirstAncestorOfClass("Model")
+	end
+
+	if
+		not building
+		or not building.Parent
+		or building.Parent ~= buildings
+		or not building:IsDescendantOf(buildings)
+	then
+		return nil
+	end
+
+	return building
+end
+
 local function isCollectPrompt(prompt)
 	if not prompt or not prompt:IsA("ProximityPrompt") then
 		return false
@@ -1625,23 +1924,10 @@ local function isCollectPrompt(prompt)
 		return false
 	end
 
-	if prompt.ObjectText == "Collect!" or actionText:match("x%d+") then
-		return true
-	end
-
-	local parent = prompt.Parent
-	if not parent then
-		return false
-	end
-
-	local building
-	if parent:IsA("Model") then
-		building = parent
-	elseif parent.Parent and parent.Parent:IsA("Model") then
-		building = parent.Parent
-	end
-
-	if not building or not building.Parent or building.Parent.Name ~= "Buildings" then
+	if
+		prompt.ObjectText ~= "Collect!"
+		and not actionText:match("x%d+")
+	then
 		return false
 	end
 
@@ -1651,6 +1937,14 @@ local function isCollectPrompt(prompt)
 end
 
 local function getCollectItemName(prompt)
+	local building = prompt and prompt:FindFirstAncestorOfClass("Model")
+	if building then
+		local grownResource = building:GetAttribute("GrownResource")
+		if type(grownResource) == "string" and grownResource ~= "" then
+			return grownResource
+		end
+	end
+
 	local actionText = prompt.ActionText
 	if actionText then
 		local itemName = actionText:match("x%d+ (.+)")
@@ -1676,6 +1970,46 @@ local function getCollectItemName(prompt)
 	return nil
 end
 
+local function getReadyCollectBuilding(prompt, buildings)
+	if
+		not isCollectPrompt(prompt)
+		or not prompt.Enabled
+		or not prompt:IsDescendantOf(buildings)
+	then
+		return nil
+	end
+
+	local building = getCollectBuilding(prompt, buildings)
+	if not building then
+		return nil
+	end
+
+	local resourceName = building:GetAttribute("GrownResource")
+	if type(resourceName) ~= "string" or resourceName == "" then
+		return nil
+	end
+
+	local resourcesToCollect = tonumber(building:GetAttribute("ResourcesToCollect")) or 0
+	if resourcesToCollect <= 0 or not building.PrimaryPart then
+		return nil
+	end
+
+	local resourceModel = collectResourceModels:FindFirstChild(resourceName)
+	if
+		not resourceModel
+		or not resourceModel:IsA("Model")
+		or not resourceModel.PrimaryPart
+	then
+		return nil
+	end
+
+	if os.clock() < (collectCooldownByBuilding[building] or 0) then
+		return nil
+	end
+
+	return building, resourceName
+end
+
 local function getCollectibleItemNames()
 	local itemNames = {}
 	local seenNames = {}
@@ -1689,9 +2023,10 @@ local function getCollectibleItemNames()
 		return itemNames
 	end
 
-	for _, descendant in ipairs(buildings:GetDescendants()) do
-		if isCollectPrompt(descendant) then
-			local itemName = getCollectItemName(descendant)
+	ensureCollectPromptCache(buildings)
+	for prompt in pairs(collectPromptCache) do
+		if prompt.Parent and isCollectPrompt(prompt) then
+			local itemName = getCollectItemName(prompt)
 			if itemName and not seenNames[itemName] and not collectExcludedBuildingNames[itemName] then
 				seenNames[itemName] = true
 				table.insert(itemNames, itemName)
@@ -1717,7 +2052,9 @@ local function collectSelectedItems()
 		return
 	end
 
-	local selectedItems = State.selectedCollectItems
+	ensureCollectPromptCache(buildings)
+
+	local selectedItems = State.selectedCollectItems or {}
 	local collectEverything = false
 
 	for _, selectedItem in ipairs(selectedItems) do
@@ -1729,25 +2066,30 @@ local function collectSelectedItems()
 
 	collectEverything = collectEverything or not selectedItems or #selectedItems == 0
 
-	for _, descendant in ipairs(buildings:GetDescendants()) do
+	for prompt in pairs(collectPromptCache) do
 		if not State.autoCollectRunning then
 			break
 		end
 
-		if isCollectPrompt(descendant) then
-			local itemName = getCollectItemName(descendant)
-			if itemName and not collectExcludedBuildingNames[itemName] then
-				if collectEverything then
-					fireproximityprompt(descendant)
-					task.wait(0.1)
-				else
+		if prompt.Parent then
+			local building, resourceName = getReadyCollectBuilding(prompt, buildings)
+			local itemName = resourceName or getCollectItemName(prompt)
+			if building and itemName and not collectExcludedBuildingNames[itemName] then
+				local allowed = collectEverything
+				if not allowed then
 					for _, selectedItem in ipairs(selectedItems) do
-						if selectedItem == itemName then
-							fireproximityprompt(descendant)
-							task.wait(0.1)
+						if selectedItem == itemName or selectedItem == building.Name then
+							allowed = true
 							break
 						end
 					end
+				end
+
+				if allowed then
+					local cooldown = math.max(2, tonumber(State.autoCollectInterval) or 2)
+					collectCooldownByBuilding[building] = os.clock() + cooldown
+					pcall(fireproximityprompt, prompt)
+					task.wait()
 				end
 			end
 		end
@@ -1756,6 +2098,7 @@ end
 
 GameApi.isCollectPrompt = isCollectPrompt
 GameApi.getCollectItemName = getCollectItemName
+GameApi.getReadyCollectBuilding = getReadyCollectBuilding
 GameApi.getCollectibleItemNames = getCollectibleItemNames
 Automation.Collection.collectSelectedItems = collectSelectedItems
 
@@ -2619,9 +2962,97 @@ local function disableAntiAfk()
 	State._antiAfkDefaultsProcessed = nil
 end
 
+trackRuntimeCleanup(function()
+	State.miscFlyEnabled = false
+	State.miscInfJumpEnabled = false
+	State.miscAntiAfkEnabled = false
+	State.miscAutoJumpEnabled = false
+	State.miscNoClipEnabled = false
+	State.BlockNotif = false
+	autoRemoveCollectItemsEnabled = false
+
+	if State.miscNoClipConn then
+		pcall(function()
+			State.miscNoClipConn:Disconnect()
+		end)
+		State.miscNoClipConn = nil
+	end
+	pcall(stopFlying)
+	pcall(disableAntiAfk)
+	pcall(restoreNoClipCollisions)
+	pcall(setFogRemoved, false)
+	pcall(restorePerformanceSnapshot)
+	pcall(function()
+		RunService:Set3dRenderingEnabled(true)
+	end)
+end)
+
 -- --------------------------------------------------------------------------
 -- Battle Pass and quest automation
 -- --------------------------------------------------------------------------
+
+local pendingBPPickups = setmetatable({}, { __mode = "k" })
+local collectedBPPickupIds = {}
+local bpPickupCacheInitialized = false
+
+local function registerBattlePassPickup(instance)
+	if
+		not runtimeActive
+		or not instance
+		or instance.Name ~= "BATTLEPASS_POINT_PICKUP"
+		or pendingBPPickups[instance]
+	then
+		return
+	end
+
+	trackRuntimeTask(task.spawn(function()
+		-- PickupId can be replicated shortly after the Instance itself.
+		for _ = 1, 20 do
+			if not runtimeActive or not instance.Parent then
+				return
+			end
+
+			local pickupId = instance:GetAttribute("PickupId")
+			if pickupId then
+				local blockedUntil = collectedBPPickupIds[pickupId]
+				if not blockedUntil or blockedUntil <= os.clock() then
+					collectedBPPickupIds[pickupId] = nil
+					pendingBPPickups[instance] = {
+						id = pickupId,
+						attempts = 0,
+						nextAttemptAt = 0,
+					}
+				end
+				return
+			end
+
+			task.wait(0.1)
+		end
+	end))
+end
+
+local function ensureBattlePassPickupCache()
+	if bpPickupCacheInitialized then
+		return
+	end
+	bpPickupCacheInitialized = true
+
+	-- One initial discovery pass is enough. New pickups are registered by the
+	-- event below instead of allocating Workspace:GetDescendants() every cycle.
+	for _, instance in ipairs(Workspace:GetDescendants()) do
+		registerBattlePassPickup(instance)
+	end
+
+	trackRuntimeConnection(Workspace.DescendantAdded:Connect(registerBattlePassPickup))
+end
+
+local function pruneCollectedBPPickupIds(now)
+	for pickupId, expiresAt in pairs(collectedBPPickupIds) do
+		if expiresAt <= now then
+			collectedBPPickupIds[pickupId] = nil
+		end
+	end
+end
 
 local function claimBattlePassRewards()
 	local track = getgenv().autoBPTrack or "Free"
@@ -2639,22 +3070,36 @@ local function claimBattlePassRewards()
 end
 
 local function collectBattlePassPickups()
-	-- The original payload collects remotely without moving the character.
-	-- Prime the lazily-created bridge first, then preserve that behavior.
-	primeBridge("CollectBPPickup")
+	ensureBattlePassPickupCache()
+
 	local collectPickupBridge = getCachedBridge("CollectBPPickup")
 	if not collectPickupBridge then
-		warn("[MiniWar] CollectBPPickup bridge is unavailable")
-		return 0
+		primeBridge("CollectBPPickup")
+		collectPickupBridge = getCachedBridge("CollectBPPickup")
+		if not collectPickupBridge then
+			return 0
+		end
 	end
 
+	local now = os.clock()
+	pruneCollectedBPPickupIds(now)
 	local sent = 0
-	for _, pickup in ipairs(Workspace:GetDescendants()) do
-		if pickup.Name == "BATTLEPASS_POINT_PICKUP" then
-			local pickupId = pickup:GetAttribute("PickupId")
-			if pickupId and fireBridge("CollectBPPickup", pickupId) then
+	for pickup, pending in pairs(pendingBPPickups) do
+		if not pickup.Parent then
+			pendingBPPickups[pickup] = nil
+		elseif not collectedBPPickupIds[pending.id] and now >= pending.nextAttemptAt then
+			if fireBridge("CollectBPPickup", pending.id) then
 				sent += 1
-				task.wait(0.1)
+				-- Bridge Fire has no acknowledgement. Keep the weak pending
+				-- entry and retry only if the pickup still exists after a
+				-- conservative acknowledgement window.
+				collectedBPPickupIds[pending.id] = now + 10
+				pending.attempts = 0
+				pending.nextAttemptAt = now + 10
+				task.wait(0.05)
+			else
+				pending.attempts += 1
+				pending.nextAttemptAt = now + math.min(30, 2 ^ math.min(pending.attempts, 5))
 			end
 		end
 	end
@@ -2816,17 +3261,32 @@ local function createInterfaceShell()
 	}
 end
 
-local function spawnFlaggedWorker(flagName, interval, callback)
-	task.spawn(function()
-		while runtimeActive and getgenv()[flagName] do
+local function spawnConditionalWorker(workerName, isEnabled, interval, callback)
+	runtimeWorkerEpoch[workerName] = (runtimeWorkerEpoch[workerName] or 0) + 1
+	local workerEpoch = runtimeWorkerEpoch[workerName]
+
+	return trackRuntimeTask(task.spawn(function()
+		while
+			runtimeActive
+			and isEnabled()
+			and runtimeWorkerEpoch[workerName] == workerEpoch
+		do
 			pcall(callback)
 			local delay = interval
 			if type(interval) == "function" then
 				delay = interval()
 			end
+
+			delay = math.max(0.1, tonumber(delay) or 1)
 			task.wait(delay)
 		end
-	end)
+	end))
+end
+
+local function spawnFlaggedWorker(flagName, interval, callback)
+	return spawnConditionalWorker(flagName, function()
+		return getgenv()[flagName]
+	end, interval, callback)
 end
 
 local function containsValue(values, expected)
@@ -3005,7 +3465,7 @@ local function buildHomeFarmUi()
 			getgenv().autoBPCoinsRunning = enabled
 			if enabled then
 				notify("Auto Collect BP Tickets enabled")
-				spawnFlaggedWorker("autoBPCoinsRunning", 5, collectBattlePassPickups)
+				spawnFlaggedWorker("autoBPCoinsRunning", 1, collectBattlePassPickups)
 			end
 		end,
 	})
@@ -3158,32 +3618,36 @@ local function buildHomeFarmUi()
 		end)
 	end
 
-	task.spawn(function()
+	trackRuntimeTask(task.spawn(function()
 		while runtimeActive and not ClientData do
 			task.wait(0.5)
 		end
 		if not runtimeActive then
 			return
 		end
-		pcall(function()
-			ClientData.gameProducer:subscribe(function(state)
+
+		local function subscribeAndTrack(producer, selector)
+			local succeeded, cleanup = pcall(function()
+				return producer:subscribe(selector, refreshMarketDisplay)
+			end)
+			if succeeded and cleanup then
+				trackRuntimeCleanup(cleanup)
+			end
+		end
+
+		subscribeAndTrack(ClientData.gameProducer, function(state)
 				return state.market
-			end, refreshMarketDisplay)
-		end)
-		pcall(function()
-			ClientData.gameProducer:subscribe(function(state)
+			end)
+		subscribeAndTrack(ClientData.gameProducer, function(state)
 				return state.nuclearMarketBoosts
-			end, refreshMarketDisplay)
-		end)
-		pcall(function()
-			ClientData.playerProducer:subscribe(function(state)
+			end)
+		subscribeAndTrack(ClientData.playerProducer, function(state)
 				return state.player and state.player.skills
-			end, refreshMarketDisplay)
 		end)
 		refreshMarketDisplay()
-	end)
+	end))
 
-	task.spawn(function()
+	trackRuntimeTask(task.spawn(function()
 		while runtimeActive do
 			task.wait(1)
 			pcall(function()
@@ -3197,7 +3661,7 @@ local function buildHomeFarmUi()
 				uiRefs.marketTimerLabel.Text = "Next Price Update: " .. minutes .. "m " .. seconds .. "s"
 			end)
 		end
-	end)
+	end))
 
 	local marketDisplayGroup = uiRefs.Tabs.Farm:AddRightGroupbox("Market Display", "chart")
 	marketDisplayGroup:AddToggle("ShowMarket", {
@@ -3482,7 +3946,7 @@ local function buildHomeFarmUi()
 	local autoAttackGroup = uiRefs.Tabs.Farm:AddLeftGroupbox("Auto Attack", "crosshair")
 	uiRefs.raidStatusLabel = autoAttackGroup:AddLabel("Raid Status: Checking...")
 
-	task.spawn(function()
+	trackRuntimeTask(task.spawn(function()
 		while runtimeActive do
 			task.wait(2)
 			pcall(function()
@@ -3525,7 +3989,7 @@ local function buildHomeFarmUi()
 				end
 			end)
 		end
-	end)
+	end))
 
 	autoAttackGroup:AddDropdown("AttackMode", {
 		Values = { "Any", "Army", "Rocket" },
@@ -3663,7 +4127,11 @@ local function buildHomeFarmUi()
 			end
 			notify("Auto Attack enabled")
 
-			task.spawn(function()
+			local workerName = "autoAttackRunning"
+			runtimeWorkerEpoch[workerName] = (runtimeWorkerEpoch[workerName] or 0) + 1
+			local workerEpoch = runtimeWorkerEpoch[workerName]
+
+			trackRuntimeTask(task.spawn(function()
 				local prioritySettingNames = {
 					"attackPriority1",
 					"attackPriority2",
@@ -3683,7 +4151,11 @@ local function buildHomeFarmUi()
 				local currentPriority = 1
 				local lastPrioritySwitch = tick()
 
-				while runtimeActive and getgenv().autoAttackRunning do
+				while
+					runtimeActive
+					and getgenv().autoAttackRunning
+					and runtimeWorkerEpoch[workerName] == workerEpoch
+				do
 					local cycleSucceeded = pcall(function()
 						local attackMode = getgenv().attackMode or "Any"
 						local raidTargets = getAvailableRaidTargets()
@@ -3730,7 +4202,7 @@ local function buildHomeFarmUi()
 						task.wait(1)
 					end
 
-					task.wait(getgenv().autoAttackDelay)
+					task.wait(math.max(0.1, tonumber(getgenv().autoAttackDelay) or 5))
 					if tick() - lastPrioritySwitch >= getgenv().autoAttackSwitchTime then
 						lastPrioritySwitch = tick()
 						currentPriority = (currentPriority % 6) + 1
@@ -3744,7 +4216,7 @@ local function buildHomeFarmUi()
 						)
 					end
 				end
-			end)
+			end))
 		end,
 	})
 
@@ -3973,12 +4445,14 @@ local function buildHomeFarmUi()
 		task.wait(3)
 		refreshCapturePointTargets()
 	end)
-	task.spawn(function()
+	trackRuntimeTask(task.spawn(function()
 		while runtimeActive do
-			task.wait(5)
+			task.wait(15)
 			refreshCapturePointTargets()
 		end
-	end)
+	end))
+
+	local selectMasteryTarget
 
 	masteryArmyGroup:AddDropdown("MasteryArmyIndex", {
 		Values = { "1", "2", "3", "4", "5", "6", "Any" },
@@ -3995,6 +4469,25 @@ local function buildHomeFarmUi()
 			getgenv().masterArmyDeploy = enabled
 			if enabled then
 				notify("Mastery Deploy enabled")
+				spawnFlaggedWorker("masterArmyDeploy", 0.5, function()
+					local target = selectMasteryTarget()
+					if not target then
+						return
+					end
+
+					local selectedArmyIndex = getgenv().masterArmyIndex
+					if selectedArmyIndex == "Any" then
+						for armyIndex = 1, 10 do
+							if not getgenv().masterArmyDeploy then
+								break
+							end
+							deployForcesToTarget(target, armyIndex, "Army")
+							task.wait(0.05)
+						end
+					else
+						deployForcesToTarget(target, selectedArmyIndex, "Army")
+					end
+				end)
 			end
 		end,
 	})
@@ -4005,6 +4498,12 @@ local function buildHomeFarmUi()
 			getgenv().masterArmyRockets = enabled
 			if enabled then
 				notify("Mastery Rockets enabled")
+				spawnFlaggedWorker("masterArmyRockets", 3, function()
+					local target = selectMasteryTarget()
+					if target then
+						deployForcesToTarget(target, 1, "Rocket")
+					end
+				end)
 			end
 		end,
 	})
@@ -4016,7 +4515,7 @@ local function buildHomeFarmUi()
 		end,
 	})
 
-	local function selectMasteryTarget()
+	selectMasteryTarget = function()
 		if isBeastBreachActive() then
 			return getMilitaryTown()
 		end
@@ -4033,40 +4532,8 @@ local function buildHomeFarmUi()
 		return selectedTarget
 	end
 
-	task.spawn(function()
-		while runtimeActive do
-			if getgenv().masterArmyDeploy then
-				local target = selectMasteryTarget()
-				if target then
-					local selectedArmyIndex = getgenv().masterArmyIndex
-					if selectedArmyIndex == "Any" then
-						for armyIndex = 1, 10 do
-							deployForcesToTarget(target, armyIndex, "Army")
-							task.wait(0.05)
-						end
-					else
-						deployForcesToTarget(target, selectedArmyIndex, "Army")
-					end
-				end
-			end
-			task.wait(0.5)
-		end
-	end)
-
-	task.spawn(function()
-		while runtimeActive do
-			if getgenv().masterArmyRockets then
-				local target = selectMasteryTarget()
-				if target then
-					deployForcesToTarget(target, 1, "Rocket")
-				end
-			end
-			task.wait(3)
-		end
-	end)
-
 	-- Home player data is updated after all Farm controls are registered.
-	task.spawn(function()
+	trackRuntimeTask(task.spawn(function()
 		while runtimeActive do
 			pcall(function()
 				local playerState = getPlayerState()
@@ -4084,7 +4551,7 @@ local function buildHomeFarmUi()
 			end)
 			task.wait(2)
 		end
-	end)
+	end))
 end
 
 UI.createInterfaceShell = createInterfaceShell
@@ -4107,7 +4574,7 @@ local function buildShopTeleportMiscUi()
 	uiRefs.shopRestockLabel = shopControls:AddLabel("Shop Restock: Loading...")
 	uiRefs.blackMarketTimerLabelShop = shopControls:AddLabel("Black Market: Loading...")
 
-	task.spawn(function()
+	trackRuntimeTask(task.spawn(function()
 		while runtimeActive do
 			task.wait(1)
 
@@ -4121,7 +4588,7 @@ local function buildShopTeleportMiscUi()
 				uiRefs.blackMarketTimerLabelShop:SetText("Black Market: " .. blackMarketTimer.Text)
 			end)
 		end
-	end)
+	end))
 
 	shopControls:AddButton({
 		Text = "Open Shop",
@@ -4280,14 +4747,11 @@ local function buildShopTeleportMiscUi()
 			State.autoBuyRunning = enabled
 			if enabled then
 				notify("Auto Buy Selected enabled")
-				task.spawn(function()
-					while runtimeActive and State.autoBuyRunning do
-						local selectedItems = collectSelectedShopItems()
-						pcall(function()
-							buySelectedItems(selectedItems)
-						end)
-						task.wait(2)
-					end
+				spawnConditionalWorker("stateAutoBuyRunning", function()
+					return State.autoBuyRunning
+				end, 2, function()
+					local selectedItems = collectSelectedShopItems()
+					buySelectedItems(selectedItems)
 				end)
 			end
 		end,
@@ -4300,12 +4764,9 @@ local function buildShopTeleportMiscUi()
 			State.autoBuyAllRunning = enabled
 			if enabled then
 				notify("Auto Buy All enabled")
-				task.spawn(function()
-					while runtimeActive and State.autoBuyAllRunning do
-						pcall(buyAllAvailableItems)
-						task.wait(2)
-					end
-				end)
+				spawnConditionalWorker("stateAutoBuyAllRunning", function()
+					return State.autoBuyAllRunning
+				end, 2, buyAllAvailableItems)
 			end
 		end,
 	})
@@ -4465,12 +4926,11 @@ local function buildShopTeleportMiscUi()
 			State.autoPlaceBuildingRunning = enabled
 			if enabled then
 				notify("Auto Place Best enabled")
-				task.spawn(function()
-					while runtimeActive and State.autoPlaceBuildingRunning do
-						pcall(placeBestBuildingOnce)
-						task.wait(State.autoPlaceInterval)
-					end
-				end)
+				spawnConditionalWorker("stateAutoPlaceBuildingRunning", function()
+					return State.autoPlaceBuildingRunning
+				end, function()
+					return State.autoPlaceInterval
+				end, placeBestBuildingOnce)
 			end
 		end,
 	})
@@ -4506,12 +4966,9 @@ local function buildShopTeleportMiscUi()
 			State.autoSellBuildingRunning = enabled
 			if enabled then
 				notify("Auto Sell Buildings enabled")
-				task.spawn(function()
-					while runtimeActive and State.autoSellBuildingRunning do
-						pcall(sellSelectedBuildings)
-						task.wait(2)
-					end
-				end)
+				spawnConditionalWorker("stateAutoSellBuildingRunning", function()
+					return State.autoSellBuildingRunning
+				end, 2, sellSelectedBuildings)
 			end
 		end,
 	})
@@ -4615,12 +5072,9 @@ local function buildShopTeleportMiscUi()
 			State.autoBuyPlotRunning = enabled
 			if enabled then
 				notify("Auto Buy Plot enabled")
-				task.spawn(function()
-					while runtimeActive and State.autoBuyPlotRunning do
-						pcall(buySelectedPlotSlots)
-						task.wait(1)
-					end
-				end)
+				spawnConditionalWorker("stateAutoBuyPlotRunning", function()
+					return State.autoBuyPlotRunning
+				end, 1, buySelectedPlotSlots)
 			else
 				notify("Auto Buy Plot disabled")
 			end
@@ -4793,6 +5247,14 @@ local function buildShopTeleportMiscUi()
 		Default = false,
 		Callback = function(enabled)
 			setNoClipEnabled(enabled)
+			if enabled and not State.miscNoClipConn then
+				State.miscNoClipConn = RunService.Stepped:Connect(function()
+					pcall(enforceNoClip)
+				end)
+			elseif not enabled and State.miscNoClipConn then
+				State.miscNoClipConn:Disconnect()
+				State.miscNoClipConn = nil
+			end
 		end,
 	})
 
@@ -4830,7 +5292,6 @@ local function buildShopTeleportMiscUi()
 	})
 
 	State.miscAutoJumpEnabled = false
-	local autoJumpTask = nil
 
 	utilityGroup:AddToggle("AutoJump", {
 		Text = "Auto Jump to prevent getting kick",
@@ -4839,25 +5300,19 @@ local function buildShopTeleportMiscUi()
 			State.miscAutoJumpEnabled = enabled
 			if enabled then
 				notify("Auto Jump enabled")
-				if not autoJumpTask or autoJumpTask.Cancelled then
-					autoJumpTask = task.spawn(function()
-						while runtimeActive and State.miscAutoJumpEnabled do
-							local character = LocalPlayer.Character
-							local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-							if humanoid and humanoid.Health > 0 then
-								humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-							end
-
-							task.wait(math.random(8, 18))
-						end
-					end)
-				end
+				spawnConditionalWorker("stateMiscAutoJumpEnabled", function()
+					return State.miscAutoJumpEnabled
+				end, function()
+					return math.random(8, 18)
+				end, function()
+					local character = LocalPlayer.Character
+					local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+					if humanoid and humanoid.Health > 0 then
+						humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+					end
+				end)
 			else
 				notify("Auto Jump disabled")
-				if autoJumpTask then
-					task.cancel(autoJumpTask)
-					autoJumpTask = nil
-				end
 			end
 		end,
 	})
@@ -4870,59 +5325,77 @@ local function buildShopTeleportMiscUi()
 		end,
 	})
 
+	local blockPopupConnections = {}
+	local blockPopupContainers = setmetatable({}, { __mode = "k" })
+
+	local function stopBlockingPopups()
+		for _, connection in ipairs(blockPopupConnections) do
+			pcall(function()
+				connection:Disconnect()
+			end)
+		end
+		table.clear(blockPopupConnections)
+		table.clear(blockPopupContainers)
+	end
+
+	local function registerPopupContainer(container)
+		if
+			not container
+			or blockPopupContainers[container]
+			or (container.Name ~= "NotificationsUI" and container.Name ~= "Notifications")
+		then
+			return
+		end
+
+		blockPopupContainers[container] = true
+		for _, notification in ipairs(container:GetChildren()) do
+			if State.BlockNotif then
+				pcall(function()
+					notification:Destroy()
+				end)
+			end
+		end
+
+		table.insert(blockPopupConnections, container.ChildAdded:Connect(function(notification)
+			if not State.BlockNotif then
+				return
+			end
+
+			task.defer(function()
+				if State.BlockNotif and notification.Parent then
+					pcall(function()
+						notification:Destroy()
+					end)
+				end
+			end)
+		end))
+	end
+
+	local function startBlockingPopups()
+		stopBlockingPopups()
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		if not playerGui then
+			return
+		end
+
+		for _, descendant in ipairs(playerGui:GetDescendants()) do
+			registerPopupContainer(descendant)
+		end
+		table.insert(blockPopupConnections, playerGui.DescendantAdded:Connect(registerPopupContainer))
+	end
+
+	trackRuntimeCleanup(stopBlockingPopups)
+
 	utilityGroup:AddToggle("BlockPopups", {
 		Text = "Block In-Game Popups",
 		Default = false,
 		Callback = function(enabled)
 			State.BlockNotif = enabled
-			if not enabled then
-				return
+			if enabled then
+				startBlockingPopups()
+			else
+				stopBlockingPopups()
 			end
-
-			local function purgeAndBlockNotifications(container)
-				for _, notification in ipairs(container:GetChildren()) do
-					if State.BlockNotif then
-						pcall(function()
-							notification:Destroy()
-						end)
-					end
-				end
-
-				trackRuntimeConnection(container.ChildAdded:Connect(function(notification)
-					if not State.BlockNotif then
-						return
-					end
-
-					task.wait(0.02)
-					pcall(function()
-						notification:Destroy()
-					end)
-				end))
-			end
-
-			local playerGui = LocalPlayer:WaitForChild("PlayerGui", 10)
-
-			task.spawn(function()
-				local notificationContainer = playerGui
-					and playerGui:FindFirstChild("Notifs")
-					and playerGui.Notifs:FindFirstChild("Frame")
-					and playerGui.Notifs.Frame:FindFirstChild("NotificationsUI")
-
-				if notificationContainer then
-					purgeAndBlockNotifications(notificationContainer)
-				end
-			end)
-
-			task.spawn(function()
-				local notificationContainer = playerGui
-					and playerGui:FindFirstChild("OldUI")
-					and playerGui.OldUI:FindFirstChild("HUD")
-					and playerGui.OldUI.HUD:FindFirstChild("Notifications")
-
-				if notificationContainer then
-					purgeAndBlockNotifications(notificationContainer)
-				end
-			end)
 		end,
 	})
 
@@ -5024,13 +5497,9 @@ local function buildShopTeleportMiscUi()
 			autoRemoveCollectItemsEnabled = enabled
 			if enabled then
 				notify("Auto Remove Collect Items enabled")
-				task.spawn(function()
-					while runtimeActive and autoRemoveCollectItemsEnabled do
-						pcall(removeWorldCollectItems)
-						task.wait(0.1)
-					end
-				end)
+				startAutoRemoveCollectItems()
 			else
+				stopAutoRemoveCollectItems()
 				notify("Auto Remove Collect Items disabled")
 			end
 		end,
@@ -5050,61 +5519,7 @@ local function buildShopTeleportMiscUi()
 				local terrain = Workspace:FindFirstChildWhichIsA("Terrain")
 
 				if not enabled then
-					local snapshot = State._perfSnapshot
-					if not snapshot then
-						return
-					end
-
-					if terrain and snapshot.terrain then
-						terrain.WaterWaveSize = snapshot.terrain.waveSize
-						terrain.WaterWaveSpeed = snapshot.terrain.waveSpeed
-						terrain.WaterReflectance = snapshot.terrain.reflectance
-						terrain.WaterTransparency = snapshot.terrain.transparency
-					end
-
-					lighting.GlobalShadows = snapshot.globalShadows
-					lighting.FogEnd = snapshot.fogEnd
-					lighting.FogStart = snapshot.fogStart
-					settings().Rendering.QualityLevel = snapshot.qualityLevel
-
-					for _, savedPart in ipairs(snapshot.parts) do
-						pcall(function()
-							savedPart.part.CastShadow = savedPart.castShadow
-							savedPart.part.Material = savedPart.material
-							savedPart.part.Reflectance = savedPart.reflectance
-							savedPart.part.BackSurface = savedPart.back
-							savedPart.part.BottomSurface = savedPart.bottom
-							savedPart.part.FrontSurface = savedPart.front
-							savedPart.part.LeftSurface = savedPart.left
-							savedPart.part.RightSurface = savedPart.right
-							savedPart.part.TopSurface = savedPart.top
-						end)
-					end
-
-					for _, savedDecal in ipairs(snapshot.decals) do
-						pcall(function()
-							savedDecal.decal.Transparency = savedDecal.trans
-							savedDecal.decal.Texture = savedDecal.tex
-						end)
-					end
-
-					for _, savedParticle in ipairs(snapshot.particles) do
-						pcall(function()
-							savedParticle.obj.Lifetime = savedParticle.lifetime
-						end)
-					end
-
-					for _, savedPostEffect in ipairs(snapshot.postEffects) do
-						pcall(function()
-							savedPostEffect.obj.Enabled = savedPostEffect.enabled
-						end)
-					end
-
-					if State._perfDescConn then
-						State._perfDescConn:Disconnect()
-						State._perfDescConn = nil
-					end
-					State._perfSnapshot = nil
+					restorePerformanceSnapshot()
 					return
 				end
 
@@ -5119,10 +5534,12 @@ local function buildShopTeleportMiscUi()
 						reflectance = terrain.WaterReflectance,
 						transparency = terrain.WaterTransparency,
 					} or nil,
-					parts = {},
-					decals = {},
-					particles = {},
-					postEffects = {},
+					-- Weak keys let destroyed world objects be collected instead
+					-- of being retained for the lifetime of the executor session.
+					parts = setmetatable({}, { __mode = "k" }),
+					decals = setmetatable({}, { __mode = "k" }),
+					particles = setmetatable({}, { __mode = "k" }),
+					postEffects = setmetatable({}, { __mode = "k" }),
 				}
 				State._perfSnapshot = snapshot
 
@@ -5140,8 +5557,7 @@ local function buildShopTeleportMiscUi()
 
 				for _, descendant in pairs(game:GetDescendants()) do
 					if descendant:IsA("BasePart") then
-						table.insert(snapshot.parts, {
-							part = descendant,
+						snapshot.parts[descendant] = {
 							castShadow = descendant.CastShadow,
 							material = descendant.Material,
 							reflectance = descendant.Reflectance,
@@ -5151,7 +5567,7 @@ local function buildShopTeleportMiscUi()
 							left = descendant.LeftSurface,
 							right = descendant.RightSurface,
 							top = descendant.TopSurface,
-						})
+						}
 
 						descendant.CastShadow = false
 						descendant.Material = Enum.Material.Plastic
@@ -5163,35 +5579,32 @@ local function buildShopTeleportMiscUi()
 						descendant.RightSurface = Enum.SurfaceType.SmoothNoOutlines
 						descendant.TopSurface = Enum.SurfaceType.SmoothNoOutlines
 					elseif descendant:IsA("Decal") then
-						table.insert(snapshot.decals, {
-							decal = descendant,
+						snapshot.decals[descendant] = {
 							trans = descendant.Transparency,
 							tex = descendant.Texture,
-						})
+						}
 						descendant.Transparency = 1
 						descendant.Texture = ""
 					elseif descendant:IsA("ParticleEmitter") or descendant:IsA("Trail") then
-						table.insert(snapshot.particles, {
-							obj = descendant,
+						snapshot.particles[descendant] = {
 							lifetime = descendant.Lifetime,
-						})
+						}
 						descendant.Lifetime = NumberRange.new(0)
 					end
 				end
 
 				for _, descendant in pairs(lighting:GetDescendants()) do
 					if descendant:IsA("PostEffect") then
-						table.insert(snapshot.postEffects, {
-							obj = descendant,
+						snapshot.postEffects[descendant] = {
 							enabled = descendant.Enabled,
-						})
+						}
 						descendant.Enabled = false
 					end
 				end
 
 				if not State._perfDescConn then
-					State._perfDescConn = trackRuntimeConnection(Workspace.DescendantAdded:Connect(function(descendant)
-						task.spawn(function()
+					State._perfDescConn = Workspace.DescendantAdded:Connect(function(descendant)
+						pcall(function()
 							if
 								descendant:IsA("ForceField")
 								or descendant:IsA("Sparkles")
@@ -5199,13 +5612,31 @@ local function buildShopTeleportMiscUi()
 								or descendant:IsA("Fire")
 								or descendant:IsA("Beam")
 							then
-								task.wait()
-								descendant:Destroy()
+								task.defer(function()
+									if descendant.Parent then
+										pcall(function()
+											descendant:Destroy()
+										end)
+									end
+								end)
 							elseif descendant:IsA("BasePart") then
+								if snapshot.parts[descendant] == nil then
+									snapshot.parts[descendant] = {
+										castShadow = descendant.CastShadow,
+										material = descendant.Material,
+										reflectance = descendant.Reflectance,
+										back = descendant.BackSurface,
+										bottom = descendant.BottomSurface,
+										front = descendant.FrontSurface,
+										left = descendant.LeftSurface,
+										right = descendant.RightSurface,
+										top = descendant.TopSurface,
+									}
+								end
 								descendant.CastShadow = false
 							end
 						end)
-					end))
+					end)
 				end
 			end)
 		end,
@@ -5262,9 +5693,6 @@ local function buildShopTeleportMiscUi()
 		end,
 	})
 
-	trackRuntimeConnection(RunService.Stepped:Connect(function()
-		pcall(enforceNoClip)
-	end))
 end
 
 UI.buildShopTeleportMiscUi = buildShopTeleportMiscUi
@@ -5293,16 +5721,24 @@ local function createReconnectController(statusLabel)
 		currentUtcHour = os.date("!*t").hour,
 		backupServerId = nil,
 		isReconnecting = false,
+		monitorStarted = false,
 		statusLabel = statusLabel,
 	}
 
-	pcall(function()
-		controller.visitedServerIds = HttpService:JSONDecode(readfile(SERVER_HISTORY_FILE))
+	local historyLoaded = pcall(function()
+		local decodedHistory = HttpService:JSONDecode(readfile(SERVER_HISTORY_FILE))
+		if type(decodedHistory) ~= "table" then
+			error("server history is not a table")
+		end
+		controller.visitedServerIds = decodedHistory
 	end)
 
-	-- This intentionally matches the original recovery condition. A read error
-	-- leaves the initially empty table intact; decoded non-tables are replaced.
-	if not controller.visitedServerIds or type(controller.visitedServerIds) ~= "table" then
+	-- The first entry is an hour marker. Reset malformed or stale history so
+	-- the file cannot grow forever and an old server list does not block hops.
+	if
+		not historyLoaded
+		or tonumber(controller.visitedServerIds[1]) ~= controller.currentUtcHour
+	then
 		controller.visitedServerIds = { controller.currentUtcHour }
 		pcall(function()
 			writefile(SERVER_HISTORY_FILE, HttpService:JSONEncode(controller.visitedServerIds))
@@ -5329,12 +5765,16 @@ local function createReconnectController(statusLabel)
 			return nil
 		end
 
-		if response.nextPageCursor and response.nextPageCursor ~= "null" and response.nextPageCursor ~= nil then
+		if type(response.nextPageCursor) == "string" and response.nextPageCursor ~= "null" then
 			self.cursor = response.nextPageCursor
+		else
+			self.cursor = ""
 		end
 
 		for _, server in pairs(response.data) do
-			if tonumber(server.maxPlayers) > tonumber(server.playing) then
+			local maxPlayers = tonumber(server.maxPlayers)
+			local playing = tonumber(server.playing)
+			if maxPlayers and playing and maxPlayers > playing and server.id then
 				local serverId = tostring(server.id)
 				if serverId ~= game.JobId then
 					local isUnvisited = true
@@ -5400,33 +5840,36 @@ local function createReconnectController(statusLabel)
 	end
 
 	function controller:startMonitor()
-		self:refreshBackupServer()
+		if self.monitorStarted then
+			return
+		end
+		self.monitorStarted = true
 
-		-- Keep a fresh backup server ready while reconnect is enabled.
-		task.spawn(function()
-			while runtimeActive and not self.isReconnecting do
-				if getgenv().autoReconnectEnabled then
-					if not self:refreshBackupServer() and not self.backupServerId then
-						while
-							runtimeActive
-							and not self.backupServerId
-							and not self.isReconnecting
-							and getgenv().autoReconnectEnabled
-						do
-							task.wait(1)
-							self:refreshBackupServer()
-						end
+		-- Keep one backup worker for the runtime. Successful refreshes are
+		-- intentionally infrequent; failures use bounded exponential backoff.
+		trackRuntimeTask(task.spawn(function()
+			local retryDelay = 5
+			while runtimeActive do
+				if getgenv().autoReconnectEnabled and not self.isReconnecting then
+					local refreshSucceeded, foundServer = pcall(function()
+						return self:refreshBackupServer()
+					end)
+					if refreshSucceeded and foundServer then
+						retryDelay = 5
+						task.wait(60)
 					else
-						task.wait(3)
+						task.wait(retryDelay)
+						retryDelay = math.min(60, retryDelay * 2)
 					end
 				else
+					retryDelay = 5
 					task.wait(1)
 				end
 			end
-		end)
+		end))
 
 		-- Roblox displays network and kick failures below this prompt overlay.
-		task.spawn(function()
+		trackRuntimeTask(task.spawn(function()
 			local promptGui = CoreGui:FindFirstChild("RobloxPromptGui")
 			local promptOverlay = promptGui and promptGui:FindFirstChild("promptOverlay")
 
@@ -5439,7 +5882,7 @@ local function createReconnectController(statusLabel)
 			end
 
 			if not promptOverlay then
-				while runtimeActive and not findPromptOverlay() and not self.isReconnecting do
+				while runtimeActive and not findPromptOverlay() do
 					task.wait(0.5)
 				end
 				promptOverlay = findPromptOverlay()
@@ -5453,28 +5896,28 @@ local function createReconnectController(statusLabel)
 					end
 				end))
 			end
-		end)
+		end))
 
 		-- A removed LocalPlayer is another executor-visible disconnect signal.
-		task.spawn(function()
-			while runtimeActive and not self.isReconnecting do
-				if getgenv().autoReconnectEnabled then
+		trackRuntimeTask(task.spawn(function()
+			while runtimeActive do
+				if getgenv().autoReconnectEnabled and not self.isReconnecting then
 					if not LocalPlayer:IsDescendantOf(game) then
 						self.statusLabel:SetText("Status: Disconnected - Reconnecting...")
 						self:reconnectToBackupServer()
 						return
 					end
-					task.wait(1)
-				else
-					task.wait(1)
 				end
+				task.wait(1)
 			end
-		end)
+		end))
 
 		-- Surface controller state without coupling the monitor loops to the UI.
-		task.spawn(function()
-			while runtimeActive and not self.isReconnecting do
-				if self.backupServerId and getgenv().autoReconnectEnabled then
+		trackRuntimeTask(task.spawn(function()
+			while runtimeActive do
+				if self.isReconnecting then
+					self.statusLabel:SetText("Status: Reconnecting...")
+				elseif self.backupServerId and getgenv().autoReconnectEnabled then
 					self.statusLabel:SetText("Status: Standby | Backup: " .. self.backupServerId:sub(1, 8) .. "...")
 				elseif getgenv().autoReconnectEnabled then
 					self.statusLabel:SetText("Status: Searching for backup server...")
@@ -5483,7 +5926,7 @@ local function createReconnectController(statusLabel)
 				end
 				task.wait(2)
 			end
-		end)
+		end))
 	end
 
 	return controller
@@ -5544,13 +5987,7 @@ local function hopToRandomPublicServerForWeather()
 end
 
 local function startWeatherHopWorker()
-	task.spawn(function()
-		while runtimeActive and getgenv().weatherHopRunning do
-			task.wait(3)
-			if not getgenv().weatherHopRunning then
-				break
-			end
-
+	spawnFlaggedWorker("weatherHopRunning", 3, function()
 			local targetWeather = getgenv().weatherHopTarget or "Storm"
 			local isTargetActive
 			if targetWeather == "BeastBreach" then
@@ -5566,9 +6003,6 @@ local function startWeatherHopWorker()
 				hopToRandomPublicServerForWeather()
 				task.wait(8)
 			end
-		end
-
-		uiRefs.weatherStatusLabel:SetText("Status: Idle")
 	end)
 end
 
@@ -5585,12 +6019,11 @@ local function buildServerSettingsUi()
 			getgenv().autoHopEnabled = enabled
 			if enabled then
 				notify("Auto Hop enabled")
-				task.spawn(function()
-					while runtimeActive and getgenv().autoHopEnabled do
-						queueReExecutionOnTeleport()
-						hopToRandomServer()
-						task.wait(getgenv().autoHopInterval * 60)
-					end
+				spawnFlaggedWorker("autoHopEnabled", function()
+					return (tonumber(getgenv().autoHopInterval) or 5) * 60
+				end, function()
+					queueReExecutionOnTeleport()
+					hopToRandomServer()
 				end)
 			end
 		end,
@@ -5627,14 +6060,14 @@ local function buildServerSettingsUi()
 
 	local managementGroup = uiRefs.Tabs.Server:AddRightGroupbox("Management", "refresh")
 	uiRefs.serverIdLabel = managementGroup:AddLabel("Server ID: " .. game.JobId)
-	task.spawn(function()
+	trackRuntimeTask(task.spawn(function()
 		while runtimeActive do
 			task.wait(1)
 			pcall(function()
 				uiRefs.serverIdLabel:SetText("Server ID: " .. game.JobId)
 			end)
 		end
-	end)
+	end))
 
 	managementGroup:AddButton({
 		Text = "Copy Server ID",
@@ -5703,7 +6136,7 @@ local function buildServerSettingsUi()
 				queueReExecutionOnTeleport()
 				reconnectController:startMonitor()
 			else
-				reconnectController.isReconnecting = true
+				reconnectController.isReconnecting = false
 				uiRefs.reconnectStatusLabel:SetText("Status: Disabled")
 				notify("Auto Reconnect disabled")
 			end
@@ -5903,7 +6336,7 @@ local function buildServerSettingsUi()
 				State._perfDescConn = nil
 			end
 
-			stopRuntimeConnections()
+			Runtime.Destroy("manual-unload", true)
 
 			if uiRefs.mobileToggleGui then
 				uiRefs.mobileToggleGui:Destroy()
@@ -6097,7 +6530,7 @@ end
 -- --------------------------------------------------------------------------
 
 local function startStatusWorker()
-	task.spawn(function()
+	trackRuntimeTask(task.spawn(function()
 		while runtimeActive do
 			task.wait(1)
 			pcall(function()
@@ -6117,11 +6550,11 @@ local function startStatusWorker()
 				)
 			end)
 		end
-	end)
+	end))
 end
 
 local function initializeCollectItemDropdown()
-	task.spawn(function()
+	trackRuntimeTask(task.spawn(function()
 		task.wait(3)
 		local itemNames = getCollectibleItemNames()
 		cachedCollectItemNames = itemNames
@@ -6141,11 +6574,11 @@ local function initializeCollectItemDropdown()
 				uiRefs.collectItemDropdown:SetValue({})
 			end)
 		end
-	end)
+	end))
 end
 
 local function startUpgradeListRefreshWorker()
-	task.spawn(function()
+	trackRuntimeTask(task.spawn(function()
 		while runtimeActive do
 			task.wait(60)
 			upgradeNames = getUpgradeNames()
@@ -6161,7 +6594,7 @@ local function startUpgradeListRefreshWorker()
 				end
 			end)
 		end
-	end)
+	end))
 end
 
 local function bindCharacterRespawnHandler()
