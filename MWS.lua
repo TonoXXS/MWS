@@ -47,7 +47,7 @@ local runtimeCleanups = {}
 local runtimeTasks = setmetatable({}, { __mode = "k" })
 local runtimeWorkerEpoch = {}
 local Runtime = {
-	version = "2.0.4",
+	version = "2.0.5",
 	unloadUi = nil,
 }
 
@@ -277,7 +277,8 @@ Services.CoreGui = CoreGui
 
 local LocalPlayer = Players.LocalPlayer
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart", 15)
+assert(HumanoidRootPart, "HumanoidRootPart did not replicate within 15 seconds")
 
 Services.LocalPlayer = LocalPlayer
 Services.Character = Character
@@ -285,8 +286,11 @@ Services.HumanoidRootPart = HumanoidRootPart
 
 trackRuntimeConnection(LocalPlayer.CharacterAdded:Connect(function(newCharacter)
 	Character = newCharacter
-	newCharacter:WaitForChild("HumanoidRootPart")
-	HumanoidRootPart = newCharacter:FindFirstChild("HumanoidRootPart")
+	local newRootPart = newCharacter:WaitForChild("HumanoidRootPart", 15)
+	if not runtimeActive or not newRootPart then
+		return
+	end
+	HumanoidRootPart = newRootPart
 
 	Services.Character = Character
 	Services.HumanoidRootPart = HumanoidRootPart
@@ -297,8 +301,10 @@ end))
 -- ============================================================================
 
 local BRIDGENET_PACKAGE_NAME = "ncxyzero_bridgenet2-fork@1.1.5"
-local bridgeNetPackage = ReplicatedStorage:WaitForChild(BRIDGENET_PACKAGE_NAME)
-local DataRemoteEvent = bridgeNetPackage:WaitForChild("dataRemoteEvent")
+local bridgeNetPackage = ReplicatedStorage:WaitForChild(BRIDGENET_PACKAGE_NAME, 15)
+assert(bridgeNetPackage, BRIDGENET_PACKAGE_NAME .. " did not replicate within 15 seconds")
+local DataRemoteEvent = bridgeNetPackage:WaitForChild("dataRemoteEvent", 15)
+assert(DataRemoteEvent, "BridgeNet dataRemoteEvent did not replicate within 15 seconds")
 local BridgeNet = require(ReplicatedStorage.package._Index[BRIDGENET_PACKAGE_NAME]["bridgenet2-fork"])
 local SellSingularItemBridge = BridgeNet.ClientBridge("SellSingularItem")
 
@@ -339,51 +345,102 @@ local GetSkillsData
 local QuestsConfig
 
 local function loadGameModules()
-	pcall(function()
-		ClientData = require(ReplicatedStorage.client.modules.ClientData)
-	end)
-	pcall(function()
-		ResourcesConfig = require(ReplicatedStorage.shared.config.ResourcesConfig)
-	end)
-	pcall(function()
-		BuildingsConfig = require(ReplicatedStorage.shared.config.BuildingsConfig)
-	end)
-	pcall(function()
-		GetBridge = require(ReplicatedStorage.util.GetBridge)
-	end)
-	pcall(function()
-		GetPlotModel = require(ReplicatedStorage.util.GetPlotModel)
-	end)
-	pcall(function()
-		Grid = require(ReplicatedStorage.shared.modules.Grid)
-	end)
-	pcall(function()
-		Objects = ReplicatedStorage.shared.model.Objects
-	end)
-	pcall(function()
-		SkillsConfig = require(ReplicatedStorage.shared.config.SkillsConfig)
-	end)
-	pcall(function()
-		ClanUpgradeTreeConfig = require(ReplicatedStorage.shared.config.ClanUpgradeTreeConfig)
-	end)
-	pcall(function()
-		GetSkillsData = require(ReplicatedStorage.util.getSkillsData)
-	end)
-	pcall(function()
-		QuestsConfig = require(ReplicatedStorage.shared.config.QuestsConfig)
-	end)
+	-- Replication can finish a little after the character becomes available.
+	-- Retry only missing modules for a bounded period instead of permanently
+	-- leaving dependent features nil after one early require failure.
+	for attempt = 1, 10 do
+		if not runtimeActive then
+			return
+		end
 
-	GameApi.ClientData = ClientData
-	GameApi.ResourcesConfig = ResourcesConfig
-	GameApi.BuildingsConfig = BuildingsConfig
-	GameApi.GetBridge = GetBridge
-	GameApi.GetPlotModel = GetPlotModel
-	GameApi.Grid = Grid
-	GameApi.Objects = Objects
-	GameApi.SkillsConfig = SkillsConfig
-	GameApi.ClanUpgradeTreeConfig = ClanUpgradeTreeConfig
-	GameApi.GetSkillsData = GetSkillsData
-	GameApi.QuestsConfig = QuestsConfig
+		if not ClientData then
+			pcall(function()
+				ClientData = require(ReplicatedStorage.client.modules.ClientData)
+			end)
+		end
+		if not ResourcesConfig then
+			pcall(function()
+				ResourcesConfig = require(ReplicatedStorage.shared.config.ResourcesConfig)
+			end)
+		end
+		if not BuildingsConfig then
+			pcall(function()
+				BuildingsConfig = require(ReplicatedStorage.shared.config.BuildingsConfig)
+			end)
+		end
+		if not GetBridge then
+			pcall(function()
+				GetBridge = require(ReplicatedStorage.util.GetBridge)
+			end)
+		end
+		if not GetPlotModel then
+			pcall(function()
+				GetPlotModel = require(ReplicatedStorage.util.GetPlotModel)
+			end)
+		end
+		if not Grid then
+			pcall(function()
+				Grid = require(ReplicatedStorage.shared.modules.Grid)
+			end)
+		end
+		if not Objects then
+			pcall(function()
+				Objects = ReplicatedStorage.shared.model.Objects
+			end)
+		end
+		if not SkillsConfig then
+			pcall(function()
+				SkillsConfig = require(ReplicatedStorage.shared.config.SkillsConfig)
+			end)
+		end
+		if not ClanUpgradeTreeConfig then
+			pcall(function()
+				ClanUpgradeTreeConfig = require(ReplicatedStorage.shared.config.ClanUpgradeTreeConfig)
+			end)
+		end
+		if not GetSkillsData then
+			pcall(function()
+				GetSkillsData = require(ReplicatedStorage.util.getSkillsData)
+			end)
+		end
+		if not QuestsConfig then
+			pcall(function()
+				QuestsConfig = require(ReplicatedStorage.shared.config.QuestsConfig)
+			end)
+		end
+
+		GameApi.ClientData = ClientData
+		GameApi.ResourcesConfig = ResourcesConfig
+		GameApi.BuildingsConfig = BuildingsConfig
+		GameApi.GetBridge = GetBridge
+		GameApi.GetPlotModel = GetPlotModel
+		GameApi.Grid = Grid
+		GameApi.Objects = Objects
+		GameApi.SkillsConfig = SkillsConfig
+		GameApi.ClanUpgradeTreeConfig = ClanUpgradeTreeConfig
+		GameApi.GetSkillsData = GetSkillsData
+		GameApi.QuestsConfig = QuestsConfig
+
+		if
+			ClientData
+			and ResourcesConfig
+			and BuildingsConfig
+			and GetBridge
+			and GetPlotModel
+			and Grid
+			and Objects
+			and SkillsConfig
+			and ClanUpgradeTreeConfig
+			and GetSkillsData
+			and QuestsConfig
+		then
+			return
+		end
+
+		if attempt < 10 then
+			task.wait(1)
+		end
+	end
 end
 
 trackRuntimeTask(task.spawn(loadGameModules))
@@ -425,24 +482,37 @@ local function fireBridge(bridgeName, payload)
 		return false
 	end
 
-	local fireMethod
-	if type(bridge.Fire) == "function" then
-		fireMethod = bridge.Fire
-	elseif type(bridge.FireServer) == "function" then
-		fireMethod = bridge.FireServer
-	else
-		return false
+	local function tryFire(targetBridge)
+		local fireMethod
+		if type(targetBridge.Fire) == "function" then
+			fireMethod = targetBridge.Fire
+		elseif type(targetBridge.FireServer) == "function" then
+			fireMethod = targetBridge.FireServer
+		else
+			return false
+		end
+
+		return pcall(function()
+			if payload == nil then
+				fireMethod(targetBridge)
+			else
+				fireMethod(targetBridge, payload)
+			end
+		end)
 	end
 
-	local succeeded = pcall(function()
-		if payload == nil then
-			fireMethod(bridge)
-		else
-			fireMethod(bridge, payload)
-		end
-	end)
+	if tryFire(bridge) then
+		return true
+	end
 
-	return succeeded
+	-- Remotes can be recreated during a long session. Invalidate a stale
+	-- cached bridge and resolve it once more instead of failing forever.
+	if bridgeCache[bridgeName] == bridge then
+		bridgeCache[bridgeName] = nil
+	end
+	primeBridge(bridgeName)
+	local refreshedBridge = getCachedBridge(bridgeName)
+	return refreshedBridge ~= nil and refreshedBridge ~= bridge and tryFire(refreshedBridge)
 end
 
 local function fireDataRemote(payload)
@@ -1550,7 +1620,7 @@ local function buySelectedItems(selectedItems)
 		return
 	end
 
-	local purchaseDelay = State.autoBuyDelay or 0.3
+	local purchaseDelay = math.max(0.05, tonumber(State.autoBuyDelay) or 0.3)
 
 	-- Obsidian's multiselect uses item names as keys, so this deliberately
 	-- iterates keys rather than array values.
@@ -1572,7 +1642,7 @@ local function buySelectedItems(selectedItems)
 end
 
 local function buyAllAvailableItems()
-	local purchaseDelay = State.autoBuyDelay or 0.3
+	local purchaseDelay = math.max(0.05, tonumber(State.autoBuyDelay) or 0.3)
 	local shopNames = { "House", "Military", "Farm", "Decor" }
 
 	for _, shopName in ipairs(shopNames) do
@@ -1581,7 +1651,7 @@ local function buyAllAvailableItems()
 		local stock = (shopStocks and shopStocks[shopName] and shopStocks[shopName].stock) or {}
 
 		for itemId, amount in pairs(stock) do
-			if amount and amount > 0 then
+			if (tonumber(amount) or 0) > 0 then
 				buyShopEntry(itemId, shopName)
 				task.wait(purchaseDelay)
 			end
@@ -1620,7 +1690,7 @@ local function sellSelectedBuildings()
 	end
 
 	local buildingsToSell = sellAll and regularBuildingItemNames or selectedBuildings
-	local sellDelay = State.autoSellBuildingDelay or 0.5
+	local sellDelay = math.max(0.05, tonumber(State.autoSellBuildingDelay) or 0.5)
 
 	for _, building in ipairs(buildingsToSell) do
 		sellBuilding(building)
@@ -1637,12 +1707,16 @@ Automation.Buildings.sellSelectedBuildings = sellSelectedBuildings
 -- Public-server discovery
 -- ============================================================================
 
-local function fetchPublicServerPage()
+local function fetchPublicServerPage(sortOrder)
+	sortOrder = sortOrder == "Asc" and "Asc" or "Desc"
+
 	local succeeded, response = pcall(function()
 		return game:HttpGet(
 			"https://games.roblox.com/v1/games/"
 				.. game.PlaceId
-				.. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true"
+				.. "/servers/Public?sortOrder="
+				.. sortOrder
+				.. "&limit=100&excludeFullGames=true"
 		)
 	end)
 
@@ -1661,36 +1735,49 @@ local function fetchPublicServerPage()
 end
 
 local function hopToRandomServer()
-	local succeeded, serverPage = fetchPublicServerPage()
+	local succeeded, serverPage = fetchPublicServerPage("Desc")
 	if not succeeded then
-		return
+		return false
 	end
 
 	local candidateIds = {}
 	for _, server in pairs(serverPage.data) do
-		if server.playing < server.maxPlayers and server.id ~= game.JobId then
-			table.insert(candidateIds, server.id)
+		local playing = tonumber(server.playing)
+		local maxPlayers = tonumber(server.maxPlayers)
+		local serverId = type(server.id) == "string" and server.id or nil
+		if playing and maxPlayers and playing < maxPlayers and serverId and serverId ~= game.JobId then
+			table.insert(candidateIds, serverId)
 		end
 	end
 
 	if #candidateIds > 0 then
 		local serverId = candidateIds[math.random(#candidateIds)]
-		TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
+		return pcall(function()
+			TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
+		end)
 	end
+
+	return false
 end
 
 local function hopToLeastPopulatedServer()
-	local succeeded, serverPage = fetchPublicServerPage()
+	-- Ascending order makes the first page the actual least-populated public
+	-- servers. The old descending request only found the least-full server
+	-- inside the busiest 100 results.
+	local succeeded, serverPage = fetchPublicServerPage("Asc")
 	if not succeeded then
-		return
+		return false
 	end
 
 	local candidates = {}
 	for _, server in pairs(serverPage.data) do
-		if server.playing < server.maxPlayers and server.id ~= game.JobId then
+		local playing = tonumber(server.playing)
+		local maxPlayers = tonumber(server.maxPlayers)
+		local serverId = type(server.id) == "string" and server.id or nil
+		if playing and maxPlayers and playing < maxPlayers and serverId and serverId ~= game.JobId then
 			table.insert(candidates, {
-				id = server.id,
-				players = server.playing,
+				id = serverId,
+				players = playing,
 			})
 		end
 	end
@@ -1700,8 +1787,12 @@ local function hopToLeastPopulatedServer()
 			return left.players < right.players
 		end)
 
-		TeleportService:TeleportToPlaceInstance(game.PlaceId, candidates[1].id, LocalPlayer)
+		return pcall(function()
+			TeleportService:TeleportToPlaceInstance(game.PlaceId, candidates[1].id, LocalPlayer)
+		end)
 	end
+
+	return false
 end
 
 Automation.Servers.hopToRandomServer = hopToRandomServer
@@ -1844,10 +1935,19 @@ GameApi.findLivingFallenGeneral = findLivingFallenGeneral
 -- Resource collection
 -- ============================================================================
 
-local collectResourceModels = ReplicatedStorage
-	:WaitForChild("shared")
-	:WaitForChild("model")
-	:WaitForChild("Resources")
+local collectResourceModels
+
+local function getCollectResourceModels()
+	if collectResourceModels and collectResourceModels.Parent then
+		return collectResourceModels
+	end
+
+	local sharedFolder = ReplicatedStorage:FindFirstChild("shared")
+	local modelFolder = sharedFolder and sharedFolder:FindFirstChild("model")
+	collectResourceModels = modelFolder and modelFolder:FindFirstChild("Resources") or nil
+	return collectResourceModels
+end
+
 local collectPromptCache = setmetatable({}, { __mode = "k" })
 local collectCooldownByBuilding = setmetatable({}, { __mode = "k" })
 local collectCacheBuildings = nil
@@ -1895,15 +1995,15 @@ local function getCollectBuilding(prompt, buildings)
 		return nil
 	end
 
-	local building = prompt.Parent
-	if not building or not building:IsA("Model") then
-		building = prompt:FindFirstAncestorOfClass("Model")
+	local building = prompt:FindFirstAncestorOfClass("Model")
+	while building and building.Parent ~= buildings do
+		local parent = building.Parent
+		building = parent and parent:FindFirstAncestorOfClass("Model") or nil
 	end
 
 	if
 		not building
 		or not building.Parent
-		or building.Parent ~= buildings
 		or not building:IsDescendantOf(buildings)
 	then
 		return nil
@@ -1994,7 +2094,12 @@ local function getReadyCollectBuilding(prompt, buildings)
 		return nil
 	end
 
-	local resourceModel = collectResourceModels:FindFirstChild(resourceName)
+	local resourceModels = getCollectResourceModels()
+	if not resourceModels then
+		return nil
+	end
+
+	local resourceModel = resourceModels:FindFirstChild(resourceName)
 	if
 		not resourceModel
 		or not resourceModel:IsA("Model")
@@ -2054,7 +2159,7 @@ local function collectSelectedItems()
 
 	ensureCollectPromptCache(buildings)
 
-	local selectedItems = State.selectedCollectItems or {}
+	local selectedItems = type(State.selectedCollectItems) == "table" and State.selectedCollectItems or {}
 	local collectEverything = false
 
 	for _, selectedItem in ipairs(selectedItems) do
@@ -2064,7 +2169,7 @@ local function collectSelectedItems()
 		end
 	end
 
-	collectEverything = collectEverything or not selectedItems or #selectedItems == 0
+	collectEverything = collectEverything or #selectedItems == 0
 
 	for prompt in pairs(collectPromptCache) do
 		if not State.autoCollectRunning then
@@ -2264,7 +2369,7 @@ local function sellSelectedResources(includeMarketEligibleItems)
 		return
 	end
 
-	local selectedItems = State.selectedSellItems
+	local selectedItems = type(State.selectedSellItems) == "table" and State.selectedSellItems or {}
 	local includesAny = false
 	for _, itemName in ipairs(selectedItems) do
 		if itemName == "Any" then
@@ -2718,7 +2823,9 @@ local function disconnectGlobalConnection(key)
 	local environment = getgenv()
 	local connection = environment[key]
 	if connection then
-		connection:Disconnect()
+		pcall(function()
+			connection:Disconnect()
+		end)
 		environment[key] = nil
 	end
 end
@@ -2727,7 +2834,9 @@ local function destroyGlobalInstance(key)
 	local environment = getgenv()
 	local instance = environment[key]
 	if instance then
-		instance:Destroy()
+		pcall(function()
+			instance:Destroy()
+		end)
 		environment[key] = nil
 	end
 end
@@ -2760,10 +2869,18 @@ local function startFlying()
 		stopFlying()
 	end
 
-	local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+	local character = LocalPlayer.Character
+	if not character then
+		character = LocalPlayer.CharacterAdded:Wait()
+	end
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not humanoid then
-		while runtimeActive and not character:FindFirstChildOfClass("Humanoid") do
+		local humanoidDeadline = os.clock() + 15
+		while
+			runtimeActive
+			and os.clock() < humanoidDeadline
+			and not character:FindFirstChildOfClass("Humanoid")
+		do
 			task.wait()
 		end
 		humanoid = character:FindFirstChildOfClass("Humanoid")
@@ -2848,8 +2965,8 @@ local function startFlying()
 	end)
 
 	environment.miscFlyHB = RunService.Heartbeat:Connect(function()
-		if not getgenv().MISC_FLYING then
-			local heartbeatConnection = getgenv().miscFlyHB
+		if not environment.MISC_FLYING then
+			local heartbeatConnection = environment.miscFlyHB
 			if heartbeatConnection then
 				heartbeatConnection:Disconnect()
 			end
@@ -2865,14 +2982,20 @@ local function startFlying()
 		local forward = movement.forward + movement.backward
 		local vertical = movement.up + movement.down
 		local isMoving = horizontal ~= 0 or forward ~= 0 or vertical ~= 0
-		local speed = (isMoving and getgenv().miscFlySpeed) or 0
+		local speed = isMoving and (tonumber(environment.miscFlySpeed) or 50) or 0
+		local velocity = environment.miscFlyVel
+		local gyro = environment.miscFlyGyro
+		if not velocity or not velocity.Parent or not gyro or not gyro.Parent then
+			stopFlying()
+			return
+		end
 
 		local direction = camera.CFrame.LookVector * forward
 			+ camera.CFrame.RightVector * horizontal
 			+ camera.CFrame.UpVector * vertical
 
-		getgenv().miscFlyVel.Velocity = direction * speed
-		getgenv().miscFlyGyro.CFrame = camera.CFrame
+		velocity.Velocity = direction * speed
+		gyro.CFrame = camera.CFrame
 	end)
 
 	environment.miscFlyDied = humanoid.Died:Connect(function()
@@ -2894,23 +3017,126 @@ local function notify(message)
 	end)
 end
 
-local function queueReExecutionOnTeleport()
-	if not getgenv().autoReconnectEnabled and not getgenv().autoReExecEnabled then
-		return
+local SELF_SOURCE_URL = "https://raw.githubusercontent.com/TonoXXS/MWS/refs/heads/main/MWS.lua"
+
+local function getTeleportQueueFunction()
+	if type(queue_on_teleport) == "function" then
+		return queue_on_teleport
+	end
+	if type(syn) == "table" and type(syn.queue_on_teleport) == "function" then
+		return syn.queue_on_teleport
+	end
+	if type(fluxus) == "table" and type(fluxus.queue_on_teleport) == "function" then
+		return fluxus.queue_on_teleport
+	end
+	return nil
+end
+
+local function getTeleportQueueClearFunction()
+	if type(clear_teleport_queue) == "function" then
+		return clear_teleport_queue
+	end
+	if type(syn) == "table" and type(syn.clear_teleport_queue) == "function" then
+		return syn.clear_teleport_queue
+	end
+	if type(fluxus) == "table" and type(fluxus.clear_teleport_queue) == "function" then
+		return fluxus.clear_teleport_queue
+	end
+	return nil
+end
+
+local function cancelQueuedReExecution()
+	local currentJobId = tostring(game.JobId)
+	State.__MWS_QUEUE_CANCELLED_JOB_ID = currentJobId
+
+	-- Some executors expose a real clear operation. Do not emulate clearing by
+	-- queueing an empty string: append-only implementations treat that as one
+	-- more entry and were the source of duplicate executions.
+	local clearQueue = getTeleportQueueClearFunction()
+	if not clearQueue then
+		return false
 	end
 
-	pcall(function()
-		local reExecutionSource =
-			'loadstring(game:HttpGet("https://raw.githubusercontent.com/TonoXXS/MWS/refs/heads/main/MWS.lua", true))()'
+	local cleared = pcall(clearQueue)
+	if cleared and State.__MWS_QUEUE_ARMED_JOB_ID == currentJobId then
+		State.__MWS_QUEUE_ARMED_JOB_ID = nil
+	end
+	return cleared
+end
 
-		if queue_on_teleport then
-			queue_on_teleport(reExecutionSource)
-		elseif syn and syn.queue_on_teleport then
-			syn.queue_on_teleport(reExecutionSource)
-		elseif fluxus and fluxus.queue_on_teleport then
-			fluxus.queue_on_teleport(reExecutionSource)
-		end
-	end)
+local function queueReExecutionOnTeleport()
+	if not getgenv().autoReconnectEnabled and not getgenv().autoReExecEnabled then
+		return false
+	end
+
+	local currentJobId = tostring(game.JobId)
+	if State.__MWS_QUEUE_CANCELLED_JOB_ID == currentJobId then
+		State.__MWS_QUEUE_CANCELLED_JOB_ID = nil
+	end
+
+	-- Settings restoration may enable Auto Reconnect and Auto Re-Execute one
+	-- after another, and every hop button calls this helper too. Queue exactly
+	-- once for the current server so append-only executors do not run N copies.
+	if State.__MWS_QUEUE_ARMED_JOB_ID == currentJobId then
+		return true
+	end
+
+	local queueFunction = getTeleportQueueFunction()
+	if not queueFunction then
+		return false
+	end
+
+	local cacheKey = table.concat({
+		currentJobId,
+		tostring(os.time()),
+		tostring(math.random(100000, 999999)),
+	}, "-")
+	local sourceUrl = SELF_SOURCE_URL .. "?cb=" .. HttpService:UrlEncode(cacheKey)
+
+	-- The destination-side guard also handles queue entries left behind by an
+	-- older run. If download/compile/runtime startup fails, the guard is cleared
+	-- so another queued copy may retry instead of leaving the script unloaded.
+	local reExecutionSource = string.format([=[
+local environment = getgenv()
+local sourceJobId = %q
+local destinationJobId = tostring(game.JobId)
+if environment.__MWS_QUEUE_CANCELLED_JOB_ID == sourceJobId then
+	return
+end
+if environment.__MWS_TELEPORT_BOOTED_JOB_ID == destinationJobId then
+	return
+end
+environment.__MWS_TELEPORT_BOOTED_JOB_ID = destinationJobId
+
+local downloaded, source = pcall(function()
+	return game:HttpGet(%q, true)
+end)
+if not downloaded or type(source) ~= "string" or #source < 100 then
+	if environment.__MWS_TELEPORT_BOOTED_JOB_ID == destinationJobId then
+		environment.__MWS_TELEPORT_BOOTED_JOB_ID = nil
+	end
+	return
+end
+
+local chunk = loadstring(source)
+if not chunk then
+	if environment.__MWS_TELEPORT_BOOTED_JOB_ID == destinationJobId then
+		environment.__MWS_TELEPORT_BOOTED_JOB_ID = nil
+	end
+	return
+end
+
+local ran = pcall(chunk)
+if not ran and environment.__MWS_TELEPORT_BOOTED_JOB_ID == destinationJobId then
+	environment.__MWS_TELEPORT_BOOTED_JOB_ID = nil
+end
+]=], currentJobId, sourceUrl)
+
+	local queued = pcall(queueFunction, reExecutionSource)
+	if queued then
+		State.__MWS_QUEUE_ARMED_JOB_ID = currentJobId
+	end
+	return queued
 end
 
 local function enableAntiAfk()
@@ -3150,7 +3376,9 @@ local function getClaimableQuests()
 end
 
 local function claimSelectedQuests()
-	local selectedDifficulties = getgenv().selectedQuestDifficulty
+	local selectedDifficulties = type(getgenv().selectedQuestDifficulty) == "table"
+			and getgenv().selectedQuestDifficulty
+		or {}
 	local acceptsAnyDifficulty = false
 
 	for _, difficulty in ipairs(selectedDifficulties) do
@@ -3176,10 +3404,8 @@ local function claimSelectedQuests()
 
 	for _, questName in ipairs(claimableQuests) do
 		local difficulty = questDifficultyByName[questName]
-		if
-			difficulty
-			and (acceptsAnyDifficulty or #selectedDifficulties == 0 or selectedDifficultyLookup[difficulty])
-		then
+		local noDifficultyFilter = acceptsAnyDifficulty or #selectedDifficulties == 0
+		if noDifficultyFilter or (difficulty and selectedDifficultyLookup[difficulty]) then
 			table.insert(questsToClaim, questName)
 		end
 	end
@@ -3266,15 +3492,17 @@ local function spawnConditionalWorker(workerName, isEnabled, interval, callback)
 	local workerEpoch = runtimeWorkerEpoch[workerName]
 
 	return trackRuntimeTask(task.spawn(function()
-		while
-			runtimeActive
-			and isEnabled()
-			and runtimeWorkerEpoch[workerName] == workerEpoch
-		do
+		while runtimeActive and runtimeWorkerEpoch[workerName] == workerEpoch do
+			local checkSucceeded, enabled = pcall(isEnabled)
+			if not checkSucceeded or not enabled then
+				break
+			end
+
 			pcall(callback)
 			local delay = interval
 			if type(interval) == "function" then
-				delay = interval()
+				local intervalSucceeded, computedDelay = pcall(interval)
+				delay = intervalSucceeded and computedDelay or 1
 			end
 
 			delay = math.max(0.1, tonumber(delay) or 1)
@@ -3570,15 +3798,19 @@ local function buildHomeFarmUi()
 
 		local market = gameState.market
 		nextMarketUpdateAt = market.nextInterval
+		if type(market.stock) ~= "table" then
+			return "Market stock not available"
+		end
 
 		local displayEntries = {}
 		for resourceId, stockMultiplier in pairs(market.stock) do
 			local resource = ResourcesConfig[resourceId]
-			if resource and not resource.dontDisplayInMarket then
+			local basePrice = resource and tonumber(resource.Price)
+			if resource and basePrice and not resource.dontDisplayInMarket then
 				local multiplier, nuclearBoosted =
 					getAdjustedMarketMultiplier(gameState, resourceId, stockMultiplier)
 
-				local salePrice = math.round(resource.Price * multiplier) * 2
+				local salePrice = math.round(basePrice * multiplier) * 2
 				local percentChange = math.round((multiplier - 1) * 100)
 				local direction = if percentChange > 0 then "↑" elseif percentChange < 0 then "↓" else "→"
 				local prefix = nuclearBoosted and "☢ " or ""
@@ -3847,7 +4079,9 @@ local function buildHomeFarmUi()
 
 		local skillState = playerState.skills
 		local availableMoney = tonumber(playerState.money) or 0
-		local selectedSkills = getgenv().selectedUpgradeStat
+		local selectedSkills = type(getgenv().selectedUpgradeStat) == "table"
+				and getgenv().selectedUpgradeStat
+				or {}
 		local upgradeAnySkill = containsValue(selectedSkills, "Any")
 		local filterSkills = not upgradeAnySkill and #selectedSkills > 0
 		local selectedSkillSet = {}
@@ -3878,7 +4112,9 @@ local function buildHomeFarmUi()
 			return
 		end
 
-		local selectedClanNodes = getgenv().selectedClanUpgrades
+		local selectedClanNodes = type(getgenv().selectedClanUpgrades) == "table"
+				and getgenv().selectedClanUpgrades
+				or {}
 		local upgradeAnyClanNode = containsValue(selectedClanNodes, "Any")
 		local filterClanNodes = not upgradeAnyClanNode and #selectedClanNodes > 0
 		local selectedClanNodeSet = {}
@@ -4203,7 +4439,8 @@ local function buildHomeFarmUi()
 					end
 
 					task.wait(math.max(0.1, tonumber(getgenv().autoAttackDelay) or 5))
-					if tick() - lastPrioritySwitch >= getgenv().autoAttackSwitchTime then
+					local switchTime = math.max(1, tonumber(getgenv().autoAttackSwitchTime) or 900)
+					if tick() - lastPrioritySwitch >= switchTime then
 						lastPrioritySwitch = tick()
 						currentPriority = (currentPriority % 6) + 1
 						local targetName = getgenv()[prioritySettingNames[currentPriority]] or "Skip"
@@ -4526,10 +4763,20 @@ local function buildHomeFarmUi()
 		end
 
 		local selectedTarget = getgenv().masterArmyTarget
+		if selectedTarget == "RaidEvent" then
+			return nil
+		end
 		if not selectedTarget or selectedTarget == "Any" then
 			return findFirstEnemyCapturePoint()
 		end
-		return selectedTarget
+		if
+			typeof(selectedTarget) == "Instance"
+			and selectedTarget.Parent
+			and not isOwnedByLocalPlayer(selectedTarget)
+		then
+			return selectedTarget
+		end
+		return findFirstEnemyCapturePoint()
 	end
 
 	-- Home player data is updated after all Farm controls are registered.
@@ -4694,7 +4941,7 @@ local function buildShopTeleportMiscUi()
 		local selectedItems = {}
 
 		local function appendSelectedCategory(selection, allCategoryItems)
-			if not selection or #selection == 0 then
+			if type(selection) ~= "table" or #selection == 0 then
 				return
 			end
 
@@ -4820,14 +5067,14 @@ local function buildShopTeleportMiscUi()
 		for itemName, itemState in pairs(playerState.backpack) do
 			local amount
 			if type(itemState) == "table" then
-				amount = itemState.amount or 0
+				amount = tonumber(itemState.amount) or 0
 			else
-				amount = itemState or 0
+				amount = tonumber(itemState) or 0
 			end
 
 			if amount > 0 then
 				local building = BuildingsConfig[itemName]
-				local price = (building and building.Price) or 0
+				local price = tonumber(building and building.Price) or 0
 				if price > bestPrice then
 					bestPrice = price
 					bestItemName = itemName
@@ -4849,49 +5096,54 @@ local function buildShopTeleportMiscUi()
 			return nil
 		end
 
-		local grid = Grid.new(plotBase, objectModel)
+		local gridCreated, grid = pcall(Grid.new, plotBase, objectModel)
+		if not gridCreated or not grid then
+			return nil
+		end
 		local foundCFrame
 
-		if grid.preview and grid.preview:FindFirstChild("Hitbox") then
-			local halfWidth = math.floor(plotBase.Size.X / 2)
-			local halfDepth = math.floor(plotBase.Size.Z / 2)
-			local attempts = 0
+		local searchSucceeded = pcall(function()
+			if grid.preview and grid.preview:FindFirstChild("Hitbox") then
+				local halfWidth = math.floor(plotBase.Size.X / 2)
+				local halfDepth = math.floor(plotBase.Size.Z / 2)
+				local attempts = 0
 
-			for x = -halfWidth, halfWidth, 2 do
-				for z = -halfDepth, halfDepth, 2 do
-					for rotation = 0, 3 do
-						grid.rotation = rotation
-						local candidate = grid:CalculatePosition(plotBase.CFrame * Vector3.new(x, 0, z))
+				for x = -halfWidth, halfWidth, 2 do
+					for z = -halfDepth, halfDepth, 2 do
+						for rotation = 0, 3 do
+							grid.rotation = rotation
+							local candidate = grid:CalculatePosition(plotBase.CFrame * Vector3.new(x, 0, z))
 
-						if candidate then
-							attempts += 1
-							if grid:ValidatePlacement(LocalPlayer, candidate) then
-								foundCFrame = candidate
-								break
+							if candidate then
+								attempts += 1
+								if grid:ValidatePlacement(LocalPlayer, candidate) then
+									foundCFrame = candidate
+									break
+								end
 							end
+						end
+
+						if foundCFrame then
+							break
+						end
+
+						if attempts > 0 and attempts % 200 == 0 then
+							task.wait()
 						end
 					end
 
 					if foundCFrame then
 						break
 					end
-
-					if attempts % 200 == 0 then
-						task.wait()
-					end
-				end
-
-				if foundCFrame then
-					break
 				end
 			end
-		end
+		end)
 
 		pcall(function()
 			grid:Destroy()
 		end)
 
-		return foundCFrame
+		return searchSucceeded and foundCFrame or nil
 	end
 
 	local function placeBestBuildingOnce()
@@ -5020,7 +5272,7 @@ local function buildShopTeleportMiscUi()
 			return
 		end
 
-		local selectedSlots = State.selectedPlotSlots
+		local selectedSlots = type(State.selectedPlotSlots) == "table" and State.selectedPlotSlots or {}
 		local includesAny = false
 		for _, slotName in ipairs(selectedSlots) do
 			if slotName == "Any" then
@@ -5224,6 +5476,12 @@ local function buildShopTeleportMiscUi()
 		Callback = function(enabled)
 			State.miscInfJumpEnabled = enabled
 			if enabled then
+				if State.miscInfJumpConn then
+					pcall(function()
+						State.miscInfJumpConn:Disconnect()
+					end)
+					State.miscInfJumpConn = nil
+				end
 				State.miscInfJumpConn = trackRuntimeConnection(UserInputService.JumpRequest:Connect(function()
 					if State.miscInfJumpEnabled then
 						pcall(function()
@@ -5522,6 +5780,9 @@ local function buildShopTeleportMiscUi()
 					restorePerformanceSnapshot()
 					return
 				end
+				if State._perfSnapshot then
+					return
+				end
 
 				local snapshot = {
 					globalShadows = lighting.GlobalShadows,
@@ -5613,7 +5874,7 @@ local function buildShopTeleportMiscUi()
 								or descendant:IsA("Beam")
 							then
 								task.defer(function()
-									if descendant.Parent then
+									if State._perfSnapshot == snapshot and descendant.Parent then
 										pcall(function()
 											descendant:Destroy()
 										end)
@@ -5646,19 +5907,63 @@ local function buildShopTeleportMiscUi()
 	-- Plot visibility and no-clip enforcement
 	-- ========================================================================
 
-	local hiddenBuildingParts = {}
+	local hiddenBuildingParts = setmetatable({}, { __mode = "k" })
+	local hideOtherBuildingsConnection
+
+	local function restoreHiddenBuildingParts()
+		if hideOtherBuildingsConnection then
+			pcall(function()
+				hideOtherBuildingsConnection:Disconnect()
+			end)
+			hideOtherBuildingsConnection = nil
+		end
+
+		for part, savedState in pairs(hiddenBuildingParts) do
+			pcall(function()
+				part.Transparency = savedState.transparency
+				part.CanCollide = savedState.canCollide
+			end)
+		end
+		table.clear(hiddenBuildingParts)
+	end
+
+	local function hideOtherBuildingPart(descendant, playerPlots, ownPlotContainer)
+		if not descendant:IsA("BasePart") then
+			return
+		end
+
+		local plotContainer = descendant
+		while plotContainer and plotContainer.Parent ~= playerPlots do
+			plotContainer = plotContainer.Parent
+		end
+		if not plotContainer or plotContainer == ownPlotContainer then
+			return
+		end
+
+		local plot = plotContainer:FindFirstChild("Plot")
+		local buildings = plot and plot:FindFirstChild("Buildings")
+		if not buildings or not descendant:IsDescendantOf(buildings) then
+			return
+		end
+
+		if not hiddenBuildingParts[descendant] then
+			hiddenBuildingParts[descendant] = {
+				transparency = descendant.Transparency,
+				canCollide = descendant.CanCollide,
+			}
+		end
+		descendant.Transparency = 1
+		descendant.CanCollide = false
+	end
+
+	trackRuntimeCleanup(restoreHiddenBuildingParts)
+
 	antiLagGroup:AddToggle("HideOtherBuildings", {
 		Text = "Hide Other Plots Buildings",
 		Default = false,
 		Callback = function(enabled)
+			restoreHiddenBuildingParts()
 			if not enabled then
-				for _, savedPart in ipairs(hiddenBuildingParts) do
-					pcall(function()
-						savedPart.part.Transparency = savedPart.trans
-						savedPart.part.CanCollide = savedPart.collide
-					end)
-				end
-				hiddenBuildingParts = {}
 				return
 			end
 
@@ -5669,27 +5974,13 @@ local function buildShopTeleportMiscUi()
 			end
 
 			local ownPlotContainer = findPlayerPlotContainer()
-			hiddenBuildingParts = {}
-
-			for _, plotContainer in ipairs(playerPlots:GetChildren()) do
-				if plotContainer ~= ownPlotContainer then
-					local plot = plotContainer:FindFirstChild("Plot")
-					local buildings = plot and plot:FindFirstChild("Buildings")
-					if buildings then
-						for _, descendant in ipairs(buildings:GetDescendants()) do
-							if descendant:IsA("BasePart") then
-								table.insert(hiddenBuildingParts, {
-									part = descendant,
-									trans = descendant.Transparency,
-									collide = descendant.CanCollide,
-								})
-								descendant.Transparency = 1
-								descendant.CanCollide = false
-							end
-						end
-					end
-				end
+			for _, descendant in ipairs(playerPlots:GetDescendants()) do
+				hideOtherBuildingPart(descendant, playerPlots, ownPlotContainer)
 			end
+
+			hideOtherBuildingsConnection = playerPlots.DescendantAdded:Connect(function(descendant)
+				hideOtherBuildingPart(descendant, playerPlots, findPlayerPlotContainer())
+			end)
 		end,
 	})
 
@@ -5718,7 +6009,7 @@ local function createReconnectController(statusLabel)
 		placeId = game.PlaceId,
 		visitedServerIds = {},
 		cursor = "",
-		currentUtcHour = os.date("!*t").hour,
+		historyMarker = os.date("!%Y-%m-%dT%H"),
 		backupServerId = nil,
 		isReconnecting = false,
 		monitorStarted = false,
@@ -5737,9 +6028,9 @@ local function createReconnectController(statusLabel)
 	-- the file cannot grow forever and an old server list does not block hops.
 	if
 		not historyLoaded
-		or tonumber(controller.visitedServerIds[1]) ~= controller.currentUtcHour
+		or tostring(controller.visitedServerIds[1]) ~= controller.historyMarker
 	then
-		controller.visitedServerIds = { controller.currentUtcHour }
+		controller.visitedServerIds = { controller.historyMarker }
 		pcall(function()
 			writefile(SERVER_HISTORY_FILE, HttpService:JSONEncode(controller.visitedServerIds))
 		end)
@@ -5748,21 +6039,21 @@ local function createReconnectController(statusLabel)
 	function controller:fetchReconnectCandidate()
 		local url = "https://games.roblox.com/v1/games/" .. self.placeId .. "/servers/Public?sortOrder=Asc&limit=100"
 		if self.cursor ~= "" then
-			url = url .. "&cursor=" .. self.cursor
+			url = url .. "&cursor=" .. HttpService:UrlEncode(self.cursor)
 		end
 
 		local requestSucceeded, responseBody = pcall(function()
 			return game:HttpGet(url)
 		end)
 		if not requestSucceeded or type(responseBody) ~= "string" or responseBody == "" then
-			return nil
+			return nil, false
 		end
 
 		local decodeSucceeded, response = pcall(function()
 			return HttpService:JSONDecode(responseBody)
 		end)
 		if not decodeSucceeded or type(response) ~= "table" or type(response.data) ~= "table" then
-			return nil
+			return nil, false
 		end
 
 		if type(response.nextPageCursor) == "string" and response.nextPageCursor ~= "null" then
@@ -5786,29 +6077,35 @@ local function createReconnectController(statusLabel)
 					end
 
 					if isUnvisited then
-						return serverId
+						return serverId, true
 					end
 				end
 			end
 		end
 
-		return nil
+		return nil, true
 	end
 
 	function controller:refreshBackupServer()
-		local candidate = self:fetchReconnectCandidate()
-		if not candidate then
-			self.cursor = ""
-			candidate = self:fetchReconnectCandidate()
+		-- Walk several pages instead of resetting to page one immediately when
+		-- its servers were already visited. Preserve a remaining cursor so the
+		-- next refresh continues rather than repeatedly polling the same page.
+		for _ = 1, 5 do
+			local candidate, pageLoaded = self:fetchReconnectCandidate()
+			if not pageLoaded then
+				break
+			end
+			if candidate then
+				self.backupServerId = candidate
+				return true
+			end
+			if self.cursor == "" then
+				break
+			end
 		end
 
-		if not candidate then
-			self.backupServerId = nil
-			return false
-		end
-
-		self.backupServerId = candidate
-		return true
+		self.backupServerId = nil
+		return false
 	end
 
 	function controller:reconnectToBackupServer()
@@ -5833,6 +6130,7 @@ local function createReconnectController(statusLabel)
 		end)
 		if not teleportStarted then
 			self.isReconnecting = false
+			self.backupServerId = nil
 			self.statusLabel:SetText("Status: Teleport failed - retrying")
 			return false
 		end
@@ -5844,6 +6142,16 @@ local function createReconnectController(statusLabel)
 			return
 		end
 		self.monitorStarted = true
+
+		trackRuntimeConnection(TeleportService.TeleportInitFailed:Connect(function(player)
+			if player ~= LocalPlayer or not self.isReconnecting then
+				return
+			end
+
+			self.isReconnecting = false
+			self.backupServerId = nil
+			self.statusLabel:SetText("Status: Teleport failed - finding another server")
+		end))
 
 		-- Keep one backup worker for the runtime. Successful refreshes are
 		-- intentionally infrequent; failures use bounded exponential backoff.
@@ -5937,21 +6245,23 @@ end
 -- --------------------------------------------------------------------------
 
 local function hopToRandomPublicServerForWeather()
-	local requestFunction = (syn and syn.request) or http_request or httprequest or request
-	if not requestFunction then
+	local requestFunction = (type(syn) == "table" and syn.request) or http_request or httprequest or request
+	if type(requestFunction) ~= "function" then
 		return
 	end
 
 	local publicServerIds = {}
 	local cursor = ""
+	local pagesFetched = 0
 
-	while runtimeActive do
+	while runtimeActive and pagesFetched < 5 do
+		pagesFetched += 1
 		local requestSucceeded, response = pcall(function()
 			return requestFunction({
 				Url = string.format(
 					"https://games.roblox.com/v1/games/%s/servers/Public?sortOrder=Desc&limit=100&cursor=%s",
 					game.PlaceId,
-					cursor
+					HttpService:UrlEncode(cursor)
 				),
 				Method = "GET",
 			})
@@ -5968,12 +6278,15 @@ local function hopToRandomPublicServerForWeather()
 		end
 
 		for _, server in pairs(page.data or {}) do
-			if server.playing < server.maxPlayers and server.id ~= game.JobId then
-				table.insert(publicServerIds, server.id)
+			local playing = tonumber(server.playing)
+			local maxPlayers = tonumber(server.maxPlayers)
+			local serverId = type(server.id) == "string" and server.id or nil
+			if playing and maxPlayers and playing < maxPlayers and serverId and serverId ~= game.JobId then
+				table.insert(publicServerIds, serverId)
 			end
 		end
 
-		cursor = page.nextPageCursor or ""
+		cursor = type(page.nextPageCursor) == "string" and page.nextPageCursor or ""
 		if cursor == "" or #publicServerIds >= 30 then
 			break
 		end
@@ -5982,7 +6295,7 @@ local function hopToRandomPublicServerForWeather()
 	if #publicServerIds > 0 then
 		queueReExecutionOnTeleport()
 		local serverId = publicServerIds[math.random(1, #publicServerIds)]
-		TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId)
+		TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
 	end
 end
 
@@ -6114,7 +6427,7 @@ local function buildServerSettingsUi()
 		Callback = function(serverId)
 			if serverId and serverId ~= "" then
 				queueReExecutionOnTeleport()
-				TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId)
+				TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
 			end
 		end,
 	})
@@ -6138,6 +6451,9 @@ local function buildServerSettingsUi()
 			else
 				reconnectController.isReconnecting = false
 				uiRefs.reconnectStatusLabel:SetText("Status: Disabled")
+				if not getgenv().autoReExecEnabled then
+					cancelQueuedReExecution()
+				end
 				notify("Auto Reconnect disabled")
 			end
 		end,
@@ -6155,13 +6471,7 @@ local function buildServerSettingsUi()
 			end
 
 			if not getgenv().autoReconnectEnabled then
-				if queue_on_teleport then
-					queue_on_teleport("")
-				elseif syn and syn.queue_on_teleport then
-					syn.queue_on_teleport("")
-				elseif fluxus and fluxus.queue_on_teleport then
-					fluxus.queue_on_teleport("")
-				end
+				cancelQueuedReExecution()
 			end
 			notify("Auto Re-Execute disabled")
 		end,
@@ -6454,7 +6764,13 @@ local function createMobileToggleButton()
 
 	local button = Instance.new("TextButton")
 	button.Size = UDim2.new(0, 55, 0, 55)
-	local viewportSize = Workspace.CurrentCamera.ViewportSize
+	local camera = Workspace.CurrentCamera
+	if not camera then
+		screenGui:Destroy()
+		uiRefs.mobileToggleGui = nil
+		return nil
+	end
+	local viewportSize = camera.ViewportSize
 	button.Position = UDim2.new(0, 10, 0, (viewportSize.Y / 2) - 27.5)
 	button.BackgroundTransparency = 1
 	button.BorderSizePixel = 0
@@ -6516,7 +6832,11 @@ local function createMobileToggleButton()
 			didDrag = true
 		end
 
-		local currentViewportSize = Workspace.CurrentCamera.ViewportSize
+		local currentCamera = Workspace.CurrentCamera
+		if not currentCamera then
+			return
+		end
+		local currentViewportSize = currentCamera.ViewportSize
 		local x = math.clamp(startPosition.X.Offset + delta.X, 0, currentViewportSize.X - 55)
 		local y = math.clamp(startPosition.Y.Offset + delta.Y, 0, currentViewportSize.Y - 55)
 		button.Position = UDim2.new(0, x, 0, y)
@@ -6600,8 +6920,11 @@ end
 local function bindCharacterRespawnHandler()
 	trackRuntimeConnection(LocalPlayer.CharacterAdded:Connect(function(newCharacter)
 		Character = newCharacter
-		newCharacter:WaitForChild("HumanoidRootPart")
-		HumanoidRootPart = newCharacter:FindFirstChild("HumanoidRootPart")
+		local newRootPart = newCharacter:WaitForChild("HumanoidRootPart", 15)
+		if not runtimeActive or not newRootPart then
+			return
+		end
+		HumanoidRootPart = newRootPart
 
 		if getgenv().miscFlyEnabled then
 			stopFlying()
